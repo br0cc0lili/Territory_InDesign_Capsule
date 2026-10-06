@@ -1,0 +1,1 @@
+Pages: 4--- Page 1 label='top_service' bounds=0,0,1200,1200--- Page 2 label='top_denis' bounds=0,0,1200,1200--- Page 3 label='bottom_denis' bounds=0,0,1200,1200--- Page 4 label='9x16_top_service' bounds=0,0,1920,1080
