@@ -1,0 +1,143 @@
+html, body {
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+body {
+    font-family: -apple-system, "Segoe UI", sans-serif;
+    font-size: 12px;
+    margin: 0;
+    padding: 12px;
+    color: #ddd;
+    background: #323232;
+    box-sizing: border-box;
+}
+
+h2 {
+    font-size: 13px;
+    margin: 0 0 8px;
+}
+
+.step {
+    margin-bottom: 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #4a4a4a;
+}
+
+button {
+    margin: 0 8px 6px 0;
+    padding: 6px 12px;
+    cursor: pointer;
+}
+
+button:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.path-label {
+    color: #9a9a9a;
+    font-size: 11px;
+}
+
+.hint {
+    color: #9a9a9a;
+    font-size: 11px;
+    margin: 0 0 8px;
+}
+
+#debug-info {
+    white-space: pre-line;
+    font-family: monospace;
+}
+
+.file-list {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    font-size: 11px;
+    color: #ccc;
+}
+
+.file-list li {
+    padding: 2px 0;
+}
+
+.banner {
+    padding: 8px 10px;
+    margin-bottom: 12px;
+    background: #5a3a00;
+    border: 1px solid #b57b00;
+    color: #ffd479;
+    border-radius: 3px;
+}
+
+.banner-hidden {
+    display: none;
+}
+
+.banner-error {
+    background: #5a1a1a;
+    border-color: #b53a3a;
+    color: #ffb3b3;
+    white-space: pre-line;
+    font-family: monospace;
+}
+
+.summary {
+    margin-top: 8px;
+    font-size: 11px;
+    white-space: pre-line;
+}
+
+.table-wrap {
+    max-height: 260px;
+    overflow-y: auto;
+    margin-top: 10px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+}
+
+th, td {
+    text-align: left;
+    padding: 4px 6px;
+    border-bottom: 1px solid #4a4a4a;
+}
+
+tr.row-skipped {
+    color: #888;
+    font-style: italic;
+}
+
+tr.row-matched {
+    color: #ddd;
+}
+
+.progress-hidden {
+    display: none;
+}
+
+#progress-bar {
+    height: 6px;
+    background: #4a4a4a;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+#progress-fill {
+    height: 100%;
+    width: 0%;
+    background: #4d9de0;
+}
+
+#progress-label {
+    margin-top: 4px;
+    font-size: 11px;
+    color: #9a9a9a;
+}
