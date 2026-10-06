@@ -67,11 +67,18 @@ async function pathExists(path) {
 const AUDI_FONT_NAME = "Audi Type\tExtended Bold";
 
 // Page label -> output config (identical to 02_generate_posters.jsx)
+// `position` is the last part of the output file name (up / bottom / footer).
 const PAGE_CONFIG = {
-    "top_service":      { textPos: "texttop",    subType: "service", w: 1200, h: 1200 },
-    "top_denis":        { textPos: "texttop",    subType: "denis",   w: 1200, h: 1200 },
-    "bottom_denis":     { textPos: "textbottom", subType: "denis",   w: 1200, h: 1200 },
-    "9x16_top_service": { textPos: "texttop",    subType: "service", w: 1080, h: 1920 },
+    "top_service":      { textPos: "texttop",    position: "up",     subType: "service", w: 1200, h: 1200 },
+    "top_denis":        { textPos: "texttop",    position: "up",     subType: "denis",   w: 1200, h: 1200 },
+    "bottom_denis":     { textPos: "textbottom", position: "bottom", subType: "denis",   w: 1200, h: 1200 },
+    "9x16_top_service": { textPos: "texttop",    position: "up",     subType: "service", w: 1080, h: 1920 },
+};
+
+// File name prefix per subline type.
+const PROJECT_PREFIX = {
+    denis: "DANIS_Herbst",
+    service: "Service_Herbst",
 };
 
 // Temporary diagnostic: dumps the top-level keys of require("indesign") so we
@@ -138,6 +145,26 @@ function sanitizeHeadline(headline) {
     let s = headline.replace(/\s+/g, "_");
     s = s.replace(/[\/\\:\*\?"<>\|]/g, "");
     return s;
+}
+
+// Headline as used inside output file names: spaces removed (so "_" stays a
+// clean field separator), trailing footnote digits dropped
+// ("Ski- und Snowboardhalter1" -> "Ski-undSnowboardhalter").
+function fileNameHeadline(headline) {
+    let s = headline.replace(/\d+$/, "").replace(/\s+/g, "");
+    s = s.replace(/[\/\\:\*\?"<>\|_]/g, "");
+    return s;
+}
+
+// <DANIS_Herbst|Service_Herbst>_<year>_<headline>_<WxH>_<up|bottom|footer>.jpg
+function buildOutputFileName(rec, cfg) {
+    return [
+        PROJECT_PREFIX[cfg.subType],
+        rec.year,
+        fileNameHeadline(rec.headline),
+        `${cfg.w}x${cfg.h}`,
+        cfg.position,
+    ].join("_") + ".jpg";
 }
 
 // NOTE: InDesign's Collection-like objects are NOT consistent in this UXP DOM
@@ -270,7 +297,7 @@ async function renderAll(manifestRows, masterPath, outputRootPath, onProgress) {
                 if (!PAGE_CONFIG.hasOwnProperty(label)) continue;
                 const cfg = PAGE_CONFIG[label];
                 const subline = cfg.subType === "denis" ? rec.danis_subline : rec.service_subline;
-                const outFileName = `${sanitized}_${cfg.textPos}_${cfg.subType}_${cfg.w}x${cfg.h}.jpg`;
+                const outFileName = buildOutputFileName(rec, cfg);
                 const outPath = outDir.nativePath + "/" + outFileName;
 
                 try {
