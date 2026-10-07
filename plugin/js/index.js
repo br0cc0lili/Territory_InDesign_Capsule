@@ -11,21 +11,19 @@ const fs = uxp.storage.localFileSystem;
 // an environment where require("indesign") turns out not to behave as
 // expected), we still want every OTHER button in the panel to keep working
 // instead of the whole script aborting silently before any listener attaches.
-let matcher = null, render = null, merge = null, datamerge = null;
+let matcher = null, render = null, datamerge = null;
 const loadErrors = [];
 // Note: index.js is loaded via a plain <script src="js/index.js"> tag in
 // index.html, so require()'s relative resolution here is anchored at the
 // plugin root ("./"), not at this file's own "js/" folder — hence "./js/…".
 try { matcher = require("./js/matcher.js"); } catch (e) { loadErrors.push("matcher.js: " + e); }
 try { render = require("./js/render.js"); } catch (e) { loadErrors.push("render.js: " + e); }
-try { merge = require("./js/merge.js"); } catch (e) { loadErrors.push("merge.js: " + e); }
 try { datamerge = require("./js/datamerge.js"); } catch (e) { loadErrors.push("datamerge.js: " + e); }
 
 let excelEntry = null;
 let photosEntry = null;
 let outputEntry = null;
 let manifestRows = [];
-let inddFileEntries = [];
 let dmCsvEntry = null;
 // Prepared <name>_DataMerge.indd files that Generate renders from (step 4).
 let templatePaths = [];
@@ -37,10 +35,6 @@ const el = {
     dmCsvPath: document.getElementById("dm-csv-path"),
     btnDmPrepare: document.getElementById("btn-dm-prepare"),
     dmSummary: document.getElementById("dm-summary"),
-    btnInddFiles: document.getElementById("btn-indd-files"),
-    inddFileList: document.getElementById("indd-file-list"),
-    btnMerge: document.getElementById("btn-merge"),
-    mergeSummary: document.getElementById("merge-summary"),
     btnExcel: document.getElementById("btn-excel"),
     excelPath: document.getElementById("excel-path"),
     btnPhotos: document.getElementById("btn-photos"),
@@ -52,7 +46,6 @@ const el = {
     templateList: document.getElementById("template-list"),
     btnOutput: document.getElementById("btn-output"),
     outputPath: document.getElementById("output-path"),
-    debugInfo: document.getElementById("debug-info"),
     btnGenerate: document.getElementById("btn-generate"),
     progress: document.getElementById("progress"),
     progressFill: document.getElementById("progress-fill"),
@@ -95,8 +88,6 @@ function init() {
         el.loadErrorBanner.classList.remove("banner-hidden");
     }
     if (!render) return; // font check needs render.js; skip if it failed to load
-
-    el.debugInfo.textContent = "indesign module keys: " + render.debugModuleShape();
 
     const fontCheck = render.checkAudiFont();
     if (!fontCheck.ok) showFontBanner(fontCheck.message);
@@ -159,58 +150,6 @@ el.btnDmPrepare.addEventListener("click", async () => {
         el.dmSummary.textContent = "Error: " + e;
     } finally {
         el.btnDmPrepare.disabled = false;
-    }
-});
-
-el.btnInddFiles.addEventListener("click", async () => {
-    let entries;
-    try {
-        entries = await fs.getFileForOpening({ types: ["indd"], allowMultiple: true });
-    } catch (e) {
-        el.mergeSummary.textContent = "Error opening file picker: " + e;
-        return;
-    }
-    if (!entries || entries.length === 0) return;
-    inddFileEntries = entries;
-    el.inddFileList.innerHTML = "";
-    for (const entry of inddFileEntries) {
-        const li = document.createElement("li");
-        li.textContent = entry.name;
-        el.inddFileList.appendChild(li);
-    }
-    el.btnMerge.disabled = inddFileEntries.length === 0;
-    el.mergeSummary.textContent = "";
-});
-
-el.btnMerge.addEventListener("click", async () => {
-    if (!merge) {
-        el.mergeSummary.textContent = "merge.js failed to load — see the banner above.";
-        return;
-    }
-    el.btnMerge.disabled = true;
-    el.mergeSummary.textContent = "Importing into the current document…";
-
-    try {
-        const result = await merge.mergeTemplates(
-            inddFileEntries,
-            (done, _total, message) => {
-                el.mergeSummary.textContent = `Importing… (${done}) ${message}`;
-            }
-        );
-
-        const labelLines = result.pageLabels
-            .map((pl) => `${pl.file} → "${pl.label}"`)
-            .join("\n");
-        const dupWarning = result.duplicateLabels.length
-            ? ` ⚠ Duplicate labels found: ${result.duplicateLabels.join(", ")} — check before generating.`
-            : "";
-        el.mergeSummary.textContent =
-            `Imported ${result.totalPages} pages into the current document.${dupWarning}\n${labelLines}\n` +
-            `Save it yourself (Cmd+S) when ready — nothing was saved automatically.`;
-    } catch (e) {
-        el.mergeSummary.textContent = "Error: " + e;
-    } finally {
-        el.btnMerge.disabled = false;
     }
 });
 

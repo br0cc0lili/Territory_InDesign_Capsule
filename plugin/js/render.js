@@ -1,4 +1,4 @@
-// render.js — fills the templates prepared by datamerge.js (step 0,
+// render.js — fills the templates prepared by datamerge.js (step 1,
 // <name>_DataMerge.indd) with each product from the panel's manifest rows
 // (matcher.js) and exports every page as a JPG.
 //
@@ -311,7 +311,7 @@ function setParagraphText(frame, paraIndex, text) {
 // story, so the headline's paragraph index stays valid.
 function setHeadlineText(frame, headline, subline) {
     const idx = nonEmptyParagraphs(frame);
-    if (!idx.length) throw new Error(FRAME_NAMES.text + " is empty — re-run Prepare (step 0)");
+    if (!idx.length) throw new Error(FRAME_NAMES.text + " is empty — re-run Prepare (step 1)");
     if (idx.length > 1) setParagraphText(frame, idx[1], subline);
     setParagraphText(frame, idx[0], headline);
 }
@@ -441,7 +441,7 @@ async function inspectTemplates(templatePaths) {
     }
     if (problems.length) {
         throw new Error(
-            "Template check failed — select the <name>_DataMerge.indd files made by step 0 (Prepare):\n  " +
+            "Template check failed — select the <name>_DataMerge.indd files made by step 1 (Prepare):\n  " +
             problems.join("\n  ")
         );
     }
@@ -462,7 +462,7 @@ async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress
     const logLines = ["timestamp,headline,page_label,output_file,status,message"];
     const failures = [];
     if (!templatePaths || !templatePaths.length) {
-        throw new Error("No templates selected — pick the <name>_DataMerge.indd files made by step 0.");
+        throw new Error("No templates selected — pick the <name>_DataMerge.indd files made by step 1.");
     }
 
     const templates = await inspectTemplates(templatePaths);

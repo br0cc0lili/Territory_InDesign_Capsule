@@ -7,10 +7,9 @@
 <body>
     <div id="load-error-banner" class="banner banner-error banner-hidden"></div>
     <div id="font-banner" class="banner banner-hidden"></div>
-    <div id="debug-info" class="hint"></div>
 
     <section class="step">
-        <h2>0. Prepare client template for Data Merge (optional)</h2>
+        <h2>1. Prepare client template for Data Merge</h2>
         <p class="hint">Open the client's .indd (layers "text", "footer",
             "Image"), pick the Excel sheet or a data source CSV, then click
             Prepare. The client file is never edited: a copy
@@ -28,22 +27,6 @@
         <button id="btn-dm-prepare" disabled>Prepare Copy of Current Document</button>
         <div id="dm-summary" class="summary"></div>
     </section>
-
-    <section class="step">
-        <h2>1. Import templates (optional)</h2>
-        <p class="hint">Pick the separate .indd layout files (one per poster
-            format, each already carrying its page label e.g. "top_service")
-            and append them as pages onto the document you currently have
-            open/active in InDesign. Nothing is saved automatically — save
-            the document yourself when you're happy with it. Skip this if
-            you already have a combined Poster_Master.indd.</p>
-        <button id="btn-indd-files">Select .indd Files…</button>
-        <ul id="indd-file-list" class="file-list"></ul>
-
-        <button id="btn-merge" disabled>Import into Current Document</button>
-        <div id="merge-summary" class="summary"></div>
-    </section>
-
     <section class="step">
         <h2>2. Select inputs</h2>
         <button id="btn-excel">Select Excel File…</button>
@@ -76,7 +59,7 @@
     <section class="step">
         <h2>4. Generate</h2>
         <p class="hint">Templates: the &lt;name&gt;_DataMerge.indd files made
-            in step 0 (added here automatically after Prepare). Pick both the
+            in step 1 (added here automatically after Prepare). Pick both the
             DANIS and the Service one — the file name tells them apart.</p>
         <button id="btn-templates">Select Prepared Templates…</button>
         <ul id="template-list" class="file-list"></ul>
