@@ -27,6 +27,8 @@ let outputEntry = null;
 let manifestRows = [];
 let inddFileEntries = [];
 let dmCsvEntry = null;
+// Prepared <name>_DataMerge.indd files that Generate renders from (step 4).
+let templatePaths = [];
 
 const el = {
     loadErrorBanner: document.getElementById("load-error-banner"),
@@ -46,6 +48,8 @@ const el = {
     btnMatch: document.getElementById("btn-match"),
     matchSummary: document.getElementById("match-summary"),
     resultsBody: document.querySelector("#results tbody"),
+    btnTemplates: document.getElementById("btn-templates"),
+    templateList: document.getElementById("template-list"),
     btnOutput: document.getElementById("btn-output"),
     outputPath: document.getElementById("output-path"),
     debugInfo: document.getElementById("debug-info"),
@@ -62,13 +66,22 @@ function updateMatchButtonState() {
 
 function updateGenerateButtonState() {
     const hasMatchedRows = manifestRows.some((r) => r.status === "matched");
-    el.btnGenerate.disabled = !(hasMatchedRows && outputEntry);
+    el.btnGenerate.disabled = !(hasMatchedRows && outputEntry && templatePaths.length);
 }
 
-async function resolveMasterPath() {
-    const pluginFolder = await fs.getPluginFolder();
-    const root = pluginFolder.nativePath.replace(/\/03_Plugin\/?$/, "");
-    return root + "/02_System/templates/Poster_Master.indd";
+function showTemplateList() {
+    el.templateList.innerHTML = "";
+    for (const path of templatePaths) {
+        const li = document.createElement("li");
+        li.textContent = path.split("/").pop();
+        el.templateList.appendChild(li);
+    }
+}
+
+function addTemplatePath(path) {
+    if (!templatePaths.some((p) => p.toLowerCase() === path.toLowerCase())) templatePaths.push(path);
+    showTemplateList();
+    updateGenerateButtonState();
 }
 
 function showFontBanner(message) {
@@ -129,6 +142,8 @@ el.btnDmPrepare.addEventListener("click", async () => {
             el.dmSummary.textContent = "Saving a working copy and preparing it…";
         }
         const result = await datamerge.prepareActiveDocument(csvPath);
+        // The prepared copy is what Generate renders from.
+        if (result.saved) addTemplatePath(result.copyPath);
         const pageLines = result.pages
             .map((pg) => `${pg.ok ? "✓" : "⚠"} Page ${pg.page}${pg.label ? ` ("${pg.label}")` : ""}\n` +
                 pg.notes.map((n) => "    " + n).join("\n"))
@@ -202,7 +217,7 @@ el.btnMerge.addEventListener("click", async () => {
 el.btnExcel.addEventListener("click", async () => {
     let entry;
     try {
-        entry = await fs.getFileForOpening({ types: ["xlsx", "xls", "csv"] });
+        entry = await fs.getFileForOpening({ types: ["xlsx"] });
     } catch (e) {
         el.excelPath.textContent = "Error: " + e;
         return;
@@ -225,6 +240,19 @@ el.btnPhotos.addEventListener("click", async () => {
     photosEntry = entry;
     el.photosPath.textContent = entry.nativePath;
     updateMatchButtonState();
+});
+
+el.btnTemplates.addEventListener("click", async () => {
+    let entries;
+    try {
+        entries = await fs.getFileForOpening({ types: ["indd"], allowMultiple: true });
+    } catch (e) {
+        el.generateSummary.textContent = "Error opening file picker: " + e;
+        return;
+    }
+    if (!entries || entries.length === 0) return;
+    templatePaths = [];
+    for (const entry of entries) addTemplatePath(entry.nativePath);
 });
 
 el.btnOutput.addEventListener("click", async () => {
@@ -298,13 +326,6 @@ el.btnGenerate.addEventListener("click", async () => {
     el.progressLabel.textContent = "Starting…";
 
     try {
-        // New workflow: if the user selected Service_Template.indd and
-        // Denis_Template.indd, render directly from those two files.
-        // Keep the legacy Poster_Master.indd fallback for old projects.
-        const templatePaths = inddFileEntries.length
-            ? inddFileEntries.map((entry) => entry.nativePath)
-            : [await resolveMasterPath()];
-
         const result = await render.renderAll(
             manifestRows,
             templatePaths,
