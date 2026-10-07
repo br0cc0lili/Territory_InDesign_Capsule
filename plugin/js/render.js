@@ -66,19 +66,26 @@ async function pathExists(path) {
 
 const AUDI_FONT_NAME = "Audi Type\tExtended Bold";
 
-// Page label -> output config (identical to 02_generate_posters.jsx)
-// `position` is the last part of the output file name (up / bottom / footer).
+// Page label -> output config.
+//
+// Two source INDD files are expected:
+//   Service_Template.indd -> 7 labelled pages
+//   Denis_Template.indd   -> 3 labelled pages
+//
+// All normal layouts keep headline + subline in the same <<Headline>> frame.
+// The Denis split layout uses two frames: <<Headline>> and <<Subline>>.
 const PAGE_CONFIG = {
-    "top_service":      { textPos: "texttop",    position: "up",     subType: "service", w: 1200, h: 1200 },
-    "top_denis":        { textPos: "texttop",    position: "up",     subType: "denis",   w: 1200, h: 1200 },
-    "bottom_denis":     { textPos: "textbottom", position: "bottom", subType: "denis",   w: 1200, h: 1200 },
-    "9x16_top_service": { textPos: "texttop",    position: "up",     subType: "service", w: 1080, h: 1920 },
-};
+    "service_1200x1200_top_a": { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
+    "service_1200x1200_top_b": { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
+    "service_1080x1920_top":   { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
+    "service_1080x1920_bottom":{ textPos: "textbottom", subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
+    "service_800x600_top":     { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 800,  h: 600  },
+    "service_800x600_bottom":  { textPos: "textbottom", subType: "service", textLayout: "stacked", w: 800,  h: 600  },
+    "service_250x250_top":     { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 250,  h: 250  },
 
-// File name prefix per subline type.
-const PROJECT_PREFIX = {
-    denis: "DANIS_Herbst",
-    service: "Service_Herbst",
+    "denis_1200x1200_top":     { textPos: "texttop",    subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
+    "denis_1200x1200_bottom":  { textPos: "textbottom", subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
+    "denis_1200x1200_split":   { textPos: "split",      subType: "denis",   textLayout: "split",   w: 1200, h: 1200 },
 };
 
 // Temporary diagnostic: dumps the top-level keys of require("indesign") so we
@@ -147,26 +154,6 @@ function sanitizeHeadline(headline) {
     return s;
 }
 
-// Headline as used inside output file names: spaces removed (so "_" stays a
-// clean field separator), trailing footnote digits dropped
-// ("Ski- und Snowboardhalter1" -> "Ski-undSnowboardhalter").
-function fileNameHeadline(headline) {
-    let s = headline.replace(/\d+$/, "").replace(/\s+/g, "");
-    s = s.replace(/[\/\\:\*\?"<>\|_]/g, "");
-    return s;
-}
-
-// <DANIS_Herbst|Service_Herbst>_<year>_<headline>_<WxH>_<up|bottom|footer>.jpg
-function buildOutputFileName(rec, cfg) {
-    return [
-        PROJECT_PREFIX[cfg.subType],
-        rec.year,
-        fileNameHeadline(rec.headline),
-        `${cfg.w}x${cfg.h}`,
-        cfg.position,
-    ].join("_") + ".jpg";
-}
-
 // NOTE: InDesign's Collection-like objects are NOT consistent in this UXP DOM
 // — `.pages` needs `.item(i)` (plain `[i]` silently returns undefined), but
 // `page.allPageItems` has no `.item()` at all (it's a plain array — `[i]` is
@@ -203,6 +190,10 @@ function findHeadlineFrame(page) {
     return findItemByName(page.allPageItems, "<<Headline>>");
 }
 
+function findSublineFrame(page) {
+    return findItemByName(page.allPageItems, "<<Subline>>");
+}
+
 function setHeadlineText(frame, headline, subline) {
     itemAt(frame.paragraphs, 0).contents = headline;
     if (frame.paragraphs.length > 1) {
@@ -211,6 +202,11 @@ function setHeadlineText(frame, headline, subline) {
         const ips = frame.insertionPoints;
         itemAt(ips, ips.length - 1).contents = "\r" + subline;
     }
+}
+
+function setSplitText(headlineFrame, sublineFrame, headline, subline) {
+    headlineFrame.contents = headline;
+    sublineFrame.contents = subline;
 }
 
 // Places the image and frames it with InDesign's Content-Aware Fit (Adobe
@@ -246,16 +242,25 @@ function exportPageAsJPEG(doc, page, outputPath) {
 // ---------- main render loop ----------
 
 // manifestRows: array from matcher.js's buildManifest() (only "matched" rows are rendered)
-// masterPath: absolute path to Poster_Master.indd
+// templatePaths: one path or an array of .indd template paths. The new workflow
+//                passes Service_Template.indd + Denis_Template.indd directly.
 // outputRootPath: absolute path to the chosen output folder
 // onProgress: optional callback(current, total, message) for UI progress updates
 // Returns: { successCount, errorCount, logLines: string[], failures: [{headline, label, message}] }
-async function renderAll(manifestRows, masterPath, outputRootPath, onProgress) {
+async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress) {
     const { app, SaveOptions } = indesign();
     const logLines = ["timestamp,headline,page_label,output_file,status,message"];
     const failures = [];
-    if (!(await pathExists(masterPath))) {
-        throw new Error("Master template not found: " + masterPath);
+
+    const paths = Array.isArray(templatePaths) ? templatePaths : [templatePaths];
+    const cleanPaths = paths.filter(Boolean);
+    if (cleanPaths.length === 0) {
+        throw new Error("No InDesign template file was provided.");
+    }
+    for (const path of cleanPaths) {
+        if (!(await pathExists(path))) {
+            throw new Error("Template not found: " + path);
+        }
     }
 
     await ensureFolder(outputRootPath);
@@ -266,22 +271,36 @@ async function renderAll(manifestRows, masterPath, outputRootPath, onProgress) {
     let successCount = 0;
     let errorCount = 0;
 
-    // Opening/closing the master file once per page-config (44 times for 11
-    // products) caused intermittent "Object is invalid" errors — InDesign
-    // doesn't always finish tearing down the previous document before the
-    // next open() call lands, so roughly every other cycle got a stale
-    // reference. Opening it ONCE for the whole batch and reusing the same
-    // page objects (each label's page just gets its text/image overwritten
-    // fresh per product, which is safe since we never save) removes the
-    // open/close race entirely and is much faster besides.
-    let doc = null;
+    // Open each selected template only once. Pages can come from either the
+    // Service or Denis INDD; page labels are the stable IDs used below.
+    const docs = [];
     try {
-        doc = app.open(masterPath, false);
-
         const pageByLabel = {};
-        for (let p = 0; p < doc.pages.length; p++) {
-            const pg = doc.pages.item(p);
-            pageByLabel[pg.label] = pg;
+        const duplicateLabels = [];
+
+        for (const path of cleanPaths) {
+            const doc = app.open(path, false);
+            docs.push(doc);
+
+            for (let p = 0; p < doc.pages.length; p++) {
+                const pg = doc.pages.item(p);
+                const label = String(pg.label || "");
+                if (!label) continue;
+                if (pageByLabel[label]) duplicateLabels.push(label);
+                pageByLabel[label] = { page: pg, doc };
+            }
+        }
+
+        if (duplicateLabels.length) {
+            throw new Error("Duplicate page label(s) across template files: " + [...new Set(duplicateLabels)].join(", "));
+        }
+
+        const missingLabels = Object.keys(PAGE_CONFIG).filter((label) => !pageByLabel[label]);
+        if (missingLabels.length) {
+            throw new Error(
+                "Template page label(s) missing: " + missingLabels.join(", ") +
+                ". Check Service_Template.indd / Denis_Template.indd page labels."
+            );
         }
 
         for (const rec of matchedRows) {
@@ -293,8 +312,6 @@ async function renderAll(manifestRows, masterPath, outputRootPath, onProgress) {
             try {
                 outDir = await ensureFolder(outputRootPath + "/" + sanitized);
             } catch (e) {
-                // Can't create this product's output folder — skip all its
-                // page configs rather than aborting the rest of the batch.
                 for (const label in PAGE_CONFIG) {
                     if (!PAGE_CONFIG.hasOwnProperty(label)) continue;
                     logLines.push([new Date().toISOString(), headline, label, "", "error", String(e).replace(/,/g, ";")].join(","));
@@ -310,25 +327,42 @@ async function renderAll(manifestRows, masterPath, outputRootPath, onProgress) {
                 if (!PAGE_CONFIG.hasOwnProperty(label)) continue;
                 const cfg = PAGE_CONFIG[label];
                 const subline = cfg.subType === "denis" ? rec.danis_subline : rec.service_subline;
-                const outFileName = buildOutputFileName(rec, cfg);
+
+                // Include the page label so the two 1200x1200 Service top variants
+                // never overwrite each other.
+                const outFileName = `${sanitized}_${label}_${cfg.w}x${cfg.h}.jpg`;
                 const outPath = outDir.nativePath + "/" + outFileName;
 
                 try {
-                    const targetPage = pageByLabel[label];
-                    if (!targetPage) throw new Error("Page label not found: " + label);
+                    const target = pageByLabel[label];
+                    const targetPage = target.page;
+                    const targetDoc = target.doc;
 
                     const allItems = targetPage.allPageItems;
-                    for (let ai = 0; ai < allItems.length; ai++) { itemAt(allItems, ai).visible = true; }
+                    for (let ai = 0; ai < allItems.length; ai++) {
+                        itemAt(allItems, ai).visible = true;
+                    }
 
                     const headlineFrame = findHeadlineFrame(targetPage);
-                    if (!headlineFrame) throw new Error("Headline frame not found on page " + label);
-                    setHeadlineText(headlineFrame, headline, subline);
+                    if (!headlineFrame) {
+                        throw new Error("<<Headline>> frame not found on page " + label);
+                    }
+
+                    if (cfg.textLayout === "split") {
+                        const sublineFrame = findSublineFrame(targetPage);
+                        if (!sublineFrame) {
+                            throw new Error("<<Subline>> frame not found on split page " + label);
+                        }
+                        setSplitText(headlineFrame, sublineFrame, headline, subline);
+                    } else {
+                        setHeadlineText(headlineFrame, headline, subline);
+                    }
 
                     const imageFrame = findImageFrame(targetPage);
-                    if (!imageFrame) throw new Error("Image frame not found on page " + label);
+                    if (!imageFrame) throw new Error("<<MainImage>> frame not found on page " + label);
                     const fitNote = placeImageFill(imageFrame, imagePath);
 
-                    exportPageAsJPEG(doc, targetPage, outPath);
+                    exportPageAsJPEG(targetDoc, targetPage, outPath);
 
                     logLines.push([new Date().toISOString(), headline, label, outPath, "success", fitNote].join(","));
                     successCount++;
@@ -343,9 +377,9 @@ async function renderAll(manifestRows, masterPath, outputRootPath, onProgress) {
             }
         }
     } finally {
-        try {
-            if (doc) doc.close(SaveOptions.no);
-        } catch (closeErr) {}
+        for (let i = docs.length - 1; i >= 0; i--) {
+            try { docs[i].close(SaveOptions.no); } catch (closeErr) {}
+        }
     }
 
     return { successCount, errorCount, logLines, failures };
