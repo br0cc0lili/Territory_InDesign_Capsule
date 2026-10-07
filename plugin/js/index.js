@@ -11,7 +11,7 @@ const fs = uxp.storage.localFileSystem;
 // an environment where require("indesign") turns out not to behave as
 // expected), we still want every OTHER button in the panel to keep working
 // instead of the whole script aborting silently before any listener attaches.
-let matcher = null, render = null, merge = null, datamerge = null;
+let matcher = null, render = null, merge = null;
 const loadErrors = [];
 // Note: index.js is loaded via a plain <script src="js/index.js"> tag in
 // index.html, so require()'s relative resolution here is anchored at the
@@ -19,22 +19,16 @@ const loadErrors = [];
 try { matcher = require("./js/matcher.js"); } catch (e) { loadErrors.push("matcher.js: " + e); }
 try { render = require("./js/render.js"); } catch (e) { loadErrors.push("render.js: " + e); }
 try { merge = require("./js/merge.js"); } catch (e) { loadErrors.push("merge.js: " + e); }
-try { datamerge = require("./js/datamerge.js"); } catch (e) { loadErrors.push("datamerge.js: " + e); }
 
 let excelEntry = null;
 let photosEntry = null;
 let outputEntry = null;
 let manifestRows = [];
 let inddFileEntries = [];
-let dmCsvEntry = null;
 
 const el = {
     loadErrorBanner: document.getElementById("load-error-banner"),
     fontBanner: document.getElementById("font-banner"),
-    btnDmCsv: document.getElementById("btn-dm-csv"),
-    dmCsvPath: document.getElementById("dm-csv-path"),
-    btnDmPrepare: document.getElementById("btn-dm-prepare"),
-    dmSummary: document.getElementById("dm-summary"),
     btnInddFiles: document.getElementById("btn-indd-files"),
     inddFileList: document.getElementById("indd-file-list"),
     btnMerge: document.getElementById("btn-merge"),
@@ -88,64 +82,6 @@ function init() {
     const fontCheck = render.checkAudiFont();
     if (!fontCheck.ok) showFontBanner(fontCheck.message);
 }
-
-el.btnDmCsv.addEventListener("click", async () => {
-    let entry;
-    try {
-        entry = await fs.getFileForOpening({ types: ["xlsx", "csv", "txt"] });
-    } catch (e) {
-        el.dmCsvPath.textContent = "Error: " + e;
-        return;
-    }
-    if (!entry) return;
-    dmCsvEntry = entry;
-    el.dmCsvPath.textContent = entry.name;
-    el.btnDmPrepare.disabled = false;
-    el.dmSummary.textContent = "";
-});
-
-el.btnDmPrepare.addEventListener("click", async () => {
-    if (!datamerge) {
-        el.dmSummary.textContent = "datamerge.js failed to load — see the banner above.";
-        return;
-    }
-    el.btnDmPrepare.disabled = true;
-    el.dmSummary.textContent = "Saving a working copy and preparing it…";
-
-    try {
-        // Data Merge only reads CSV/TXT: convert an Excel pick first. Step 2's
-        // photos folder is used to fill @MainImage only if it happens to be
-        // chosen already — preparing the template never requires it.
-        let csvPath = dmCsvEntry.nativePath;
-        let convertNote = "";
-        if (/\.xlsx$/i.test(dmCsvEntry.name)) {
-            el.dmSummary.textContent = "Converting Excel to a Data Merge CSV…";
-            const conv = await datamerge.excelToDataSource(dmCsvEntry, photosEntry);
-            csvPath = conv.csvPath;
-            convertNote = `Wrote ${conv.rows} rows to ${csvPath} ` +
-                (photosEntry
-                    ? `(${conv.imagesResolved}/${conv.rows} images found in the photos folder).\n`
-                    : `(@MainImage paths left empty — fine for preparing the template).\n`);
-            el.dmSummary.textContent = "Saving a working copy and preparing it…";
-        }
-        const result = await datamerge.prepareActiveDocument(csvPath);
-        const pageLines = result.pages
-            .map((pg) => `${pg.ok ? "✓" : "⚠"} Page ${pg.page}${pg.label ? ` ("${pg.label}")` : ""}\n` +
-                pg.notes.map((n) => "    " + n).join("\n"))
-            .join("\n");
-        const warnLines = result.warnings.map((w) => `⚠ warning: ${w}\n`).join("");
-        el.dmSummary.textContent = convertNote +
-            `Working copy: ${result.copyPath}${result.saved ? " (saved)" : ""}\n` +
-            `Client file left untouched: ${result.sourcePath}\n` +
-            `${result.docName}: data source attached (fields: ${result.fields.join(", ")}).\n` +
-            `${warnLines}${pageLines}\n` +
-            `The prepared copy is open — check it in the Data Merge panel.`;
-    } catch (e) {
-        el.dmSummary.textContent = "Error: " + e;
-    } finally {
-        el.btnDmPrepare.disabled = false;
-    }
-});
 
 el.btnInddFiles.addEventListener("click", async () => {
     let entries;
