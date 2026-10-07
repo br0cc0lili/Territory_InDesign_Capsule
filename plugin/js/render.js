@@ -393,6 +393,23 @@ async function openTemplateCopy(templatePath) {
     throw lastErr;
 }
 
+// doc.save() straight after a batch of edits can fail with "Cannot save
+// document because there are open transactions in process on the database":
+// InDesign is still committing those edits. Yield and retry until it's done.
+async function saveWhenIdle(doc, path) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, attempt ? 250 : 0));
+        try {
+            return path ? doc.save(path) : doc.save();
+        } catch (e) {
+            lastErr = e;
+            if (!/transaction/i.test(String(e))) throw e;
+        }
+    }
+    throw lastErr;
+}
+
 function closeWithoutSaving(doc) {
     const { SaveOptions } = indesign();
     try {
@@ -565,7 +582,7 @@ async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress
                 // Save-as to the product folder: writes a new file and leaves
                 // the template untouched.
                 try {
-                    doc.save(inddPath);
+                    await saveWhenIdle(doc, inddPath);
                     logSuccess(headline, `${t.name} indd`, inddPath);
                 } catch (e) {
                     logError(headline, `${t.name} indd`, inddPath, e);
