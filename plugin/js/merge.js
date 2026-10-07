@@ -56,15 +56,57 @@ async function mergeTemplates(fileEntries, onProgress) {
         try {
             const pageCount = srcDoc.pages.length;
             for (let p = 0; p < pageCount; p++) {
-                // duplicate()'s reference must be a Page/Spread, not a Document
-                // (confirmed via the native error message) — reference the
-                // target document's current last page to append after it.
+                const srcPage = srcDoc.pages.item(p);
+
+                // Keep the source page size. A master document can contain mixed
+                // page sizes (for example 1:1 and 9:16), but some InDesign builds
+                // can make a cross-document duplicate inherit the target page size.
+                // Read the source bounds before duplicating so we can correct only
+                // when that actually happens. bounds = [y1, x1, y2, x2].
+                const srcBounds = srcPage.bounds;
+                const srcHeight = Number(srcBounds[2]) - Number(srcBounds[0]);
+                const srcWidth = Number(srcBounds[3]) - Number(srcBounds[1]);
+                const srcLabel = srcPage.label || "";
+
+                // duplicate()'s reference must be a Page/Spread, not a Document —
+                // append after the target document's current last page.
                 const refPage = targetDoc.pages.item(targetDoc.pages.length - 1);
-                srcDoc.pages.item(p).duplicate(LocationOptions.AFTER, refPage);
+                srcPage.duplicate(LocationOptions.AFTER, refPage);
+
                 const newPage = targetDoc.pages.item(targetDoc.pages.length - 1);
-                pageLabels.push({ file: entry.name, label: newPage.label || "(no label)" });
+
+                // Normally duplicate() already preserves the page dimensions.
+                // Only resize if InDesign changed them during the cross-document copy.
+                const newBounds = newPage.bounds;
+                const newHeight = Number(newBounds[2]) - Number(newBounds[0]);
+                const newWidth = Number(newBounds[3]) - Number(newBounds[1]);
+                const EPSILON = 0.01;
+                if (Math.abs(newWidth - srcWidth) > EPSILON ||
+                    Math.abs(newHeight - srcHeight) > EPSILON) {
+                    newPage.adjustLayout({
+                        width: srcWidth + "pt",
+                        height: srcHeight + "pt",
+                    });
+                }
+
+                // Be explicit about the label because render.js uses it to find
+                // pages such as "top_service" and "9x16_top_service".
+                if (srcLabel) newPage.label = srcLabel;
+
+                pageLabels.push({
+                    file: entry.name,
+                    label: newPage.label || "(no label)",
+                    width: srcWidth,
+                    height: srcHeight,
+                });
                 totalPages++;
-                if (onProgress) onProgress(totalPages, null, `${entry.name} — page ${p + 1}/${pageCount}`);
+                if (onProgress) {
+                    onProgress(
+                        totalPages,
+                        null,
+                        `${entry.name} — page ${p + 1}/${pageCount} (${Math.round(srcWidth)}×${Math.round(srcHeight)} pt)`
+                    );
+                }
             }
         } finally {
             srcDoc.close(SaveOptions.no);
