@@ -570,9 +570,10 @@ async function copyPathFor(srcPath) {
 // Returns prepareDocument()'s result plus { sourcePath, copyPath, saved, diagnostics }.
 async function prepareActiveDocument(csvPath) {
     const { app } = indesign();
+    if (!app) throw new Error("InDesign isn't ready yet (app unavailable) — wait a moment and click again.");
 
     let src;
-    try { src = app.activeDocument; } catch (e) { src = null; }
+    try { src = app.documents.length ? app.activeDocument : null; } catch (e) { src = null; }
     if (!src) throw new Error("No document is open — open the client .indd first.");
 
     // Check layers on the client file (read-only) before making any copy.

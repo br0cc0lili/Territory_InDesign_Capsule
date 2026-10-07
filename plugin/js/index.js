@@ -82,13 +82,30 @@ function showFontBanner(message) {
     el.fontBanner.classList.remove("banner-hidden");
 }
 
-function init() {
+// require("indesign").app can still be undefined right after the panel
+// shows (the bridge is mid-attach). Polls until it's there, so the first real
+// call (font check, Prepare, Generate) doesn't fail on a missing app.
+async function waitForInDesign(timeoutMs = 3000) {
+    for (let waited = 0; waited <= timeoutMs; waited += 100) {
+        try {
+            if (require("indesign").app) return true;
+        } catch (e) {}
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+}
+
+async function init() {
     if (loadErrors.length) {
         el.loadErrorBanner.textContent = "⚠ Plugin module load error(s):\n" + loadErrors.join("\n");
         el.loadErrorBanner.classList.remove("banner-hidden");
     }
     if (!render) return; // font check needs render.js; skip if it failed to load
 
+    if (!(await waitForInDesign())) {
+        showFontBanner("InDesign isn't ready yet — reload the plugin if buttons report errors.");
+        return;
+    }
     const fontCheck = render.checkAudiFont();
     if (!fontCheck.ok) showFontBanner(fontCheck.message);
 }
@@ -117,6 +134,7 @@ el.btnDmPrepare.addEventListener("click", async () => {
     el.dmSummary.textContent = "Saving a working copy and preparing it…";
 
     try {
+        await waitForInDesign();
         // Data Merge only reads CSV/TXT: convert an Excel pick first. Step 2's
         // photos folder is used to fill @MainImage only if it happens to be
         // chosen already — preparing the template never requires it.
@@ -265,6 +283,7 @@ el.btnGenerate.addEventListener("click", async () => {
     el.progressLabel.textContent = "Starting…";
 
     try {
+        await waitForInDesign();
         const result = await render.renderAll(
             manifestRows,
             templatePaths,
