@@ -139,31 +139,24 @@ el.btnDmPrepare.addEventListener("click", async () => {
         // photos folder is used to fill @MainImage only if it happens to be
         // chosen already — preparing the template never requires it.
         let csvPath = dmCsvEntry.nativePath;
-        let convertNote = "";
         if (/\.xlsx$/i.test(dmCsvEntry.name)) {
             el.dmSummary.textContent = "Converting Excel to a Data Merge CSV…";
             const conv = await datamerge.excelToDataSource(dmCsvEntry, photosEntry);
             csvPath = conv.csvPath;
-            convertNote = `Wrote ${conv.rows} rows to ${csvPath} ` +
-                (photosEntry
-                    ? `(${conv.imagesResolved}/${conv.rows} images found in the photos folder).\n`
-                    : `(@MainImage paths left empty — fine for preparing the template).\n`);
             el.dmSummary.textContent = "Saving a working copy and preparing it…";
         }
         const result = await datamerge.prepareActiveDocument(csvPath);
         // The prepared copy is what Generate renders from.
         if (result.saved) addTemplatePath(result.copyPath);
-        const pageLines = result.pages
-            .map((pg) => `${pg.ok ? "✓" : "⚠"} Page ${pg.page}${pg.label ? ` ("${pg.label}")` : ""}\n` +
-                pg.notes.map((n) => "    " + n).join("\n"))
-            .join("\n");
-        const warnLines = result.warnings.map((w) => `⚠ warning: ${w}\n`).join("");
-        el.dmSummary.textContent = convertNote +
-            `Working copy: ${result.copyPath}${result.saved ? " (saved)" : ""}\n` +
-            `Client file left untouched: ${result.sourcePath}\n` +
-            `${result.docName}: data source attached (fields: ${result.fields.join(", ")}).\n` +
-            `${warnLines}${pageLines}\n` +
-            `The prepared copy is open — check it in the Data Merge panel.`;
+        // Short, user-facing summary: one line per page. A page that failed
+        // also shows what went wrong; full details stay out of the panel.
+        const pageLines = result.pages.map((pg) => {
+            if (pg.ok) return `✓ Page ${pg.page}`;
+            const problems = pg.notes.filter((n) => n.startsWith("⚠")).map((n) => "    " + n.replace(/^⚠\s*/, ""));
+            return [`⚠ Page ${pg.page}`].concat(problems).join("\n");
+        });
+        if (!result.saved) pageLines.push("⚠ The template couldn't be saved — press Cmd+S in InDesign.");
+        el.dmSummary.textContent = pageLines.join("\n");
     } catch (e) {
         el.dmSummary.textContent = "Error: " + e;
     } finally {
