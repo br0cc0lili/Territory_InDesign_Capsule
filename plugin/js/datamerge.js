@@ -50,12 +50,12 @@ function indesign() {
 // First entry wins; later ones are accepted for older CSVs.
 const FIELD_NAMES = {
     headline: ["DANIS + SERVICE HEADLINE +PRODUCT NAMING", "DANIS + SERVICE HEADLINE"],
-    denis: ["DANIS SUBLINE"],
+    danis: ["DANIS SUBLINE"],
     service: ["SERVICE SUBLINE"],
     footer: ["DANIS ADD ON"],
     image: ["MAINIMAGE"],
 };
-const REQUIRED_ROLES = ["headline", "denis", "service", "image"];
+const REQUIRED_ROLES = ["headline", "danis", "service", "image"];
 
 // Client layer names (matched case-insensitively).
 const LAYERS = { text: "text", footer: "footer", image: "image" };
@@ -63,14 +63,6 @@ const REQUIRED_LAYERS = [LAYERS.text, LAYERS.image];
 
 // Explicit frame names; checked before the layers.
 const FRAME_NAMES = { text: "<<Headline>>", footer: "<<Footer>>", image: "<<MainImage>>" };
-
-// Same page-label convention as render.js's PAGE_CONFIG.
-const LABEL_SUBTYPE = {
-    "top_service": "service",
-    "top_denis": "denis",
-    "bottom_denis": "denis",
-    "9x16_top_service": "service",
-};
 
 const FRAME_TYPES = ["Rectangle", "Polygon", "Oval"];
 
@@ -250,16 +242,35 @@ function findImageFrame(page) {
     return exactlyOneOnLayer(page, LAYERS.image, isGraphicFrame, "graphic");
 }
 
-// Which subline field a page uses: page label first (render.js convention),
-// then the document's file name ("DANIS_Template.indd" /
-// "SERVICE_Template.indd"), then the subline text itself.
-function detectSubType(page, docName, sublineText) {
-    if (LABEL_SUBTYPE[page.label]) return { subType: LABEL_SUBTYPE[page.label], source: "page label" };
-    const n = String(docName).toLowerCase();
-    if (n.indexOf("service") !== -1) return { subType: "service", source: "file name" };
-    if (n.indexOf("denis") !== -1 || n.indexOf("danis") !== -1) return { subType: "denis", source: "file name" };
-    if (/service/i.test(sublineText || "")) return { subType: "service", source: "subline text" };
-    return { subType: "denis", source: "default" };
+// Shared DANIS/Service rule (templatetype.js). Loaded lazily, module-relative
+// path first, plugin-root path second: no other module here loads a sibling
+// yet, and index.js documents root-anchored require() resolution for itself,
+// so both are tried. If neither loads, only template classification fails —
+// with a clear error — not the whole module.
+let _templateType = null;
+function templateType() {
+    if (_templateType) return _templateType;
+    const errors = [];
+    for (const path of ["./templatetype.js", "./js/templatetype.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.detectTemplateType === "function") return (_templateType = mod);
+            errors.push(`${path}: no detectTemplateType`);
+        } catch (e) {
+            errors.push(`${path}: ${e}`);
+        }
+    }
+    throw new Error("Could not load templatetype.js (" + errors.join("; ") + ")");
+}
+
+// Which subline field the document uses (DANIS SUBLINE / SERVICE SUBLINE):
+// from the file name only, via the rule shared with render.js — no page
+// labels, subline text or default fallback. Throws if the name contains
+// neither or both of DANIS / SERVICE. The working copy is named
+// "<client name>_DataMerge.indd", so it classifies like the client file,
+// which prepareActiveDocument() checks before any copy is made.
+function detectSubType(docName) {
+    return { subType: templateType().detectTemplateType(docName), source: "file name" };
 }
 
 // Wraps one DOM call so an InDesign error names the operation that failed
@@ -392,7 +403,7 @@ function prepareText(doc, page, field, entry) {
     const sublineText = sublineIdx !== -1
         ? step("read subline", () => paragraphText(frame.paragraphs.item(sublineIdx)))
         : "";
-    const { subType, source } = detectSubType(page, doc.name, sublineText);
+    const { subType, source } = detectSubType(doc.name);
     const sublineField = field[subType];
 
     // Subline first: it sits later in the story, so doing it first keeps
@@ -430,6 +441,59 @@ function prepareFooter(doc, page, field, entry) {
     step("name frame", () => { frame.name = FRAME_NAMES.footer; });
     entry.notes.push(`footer "${before.slice(0, 40)}${before.length > 40 ? "…" : ""}" → ` +
         `<<${field.footer.fieldName}>> (frame by ${via})`);
+}
+
+// Turns hyphenation on for every paragraph of every text frame on the "text"
+// layer (the page's own frames and any parent-page frames), so long headline
+// words can break instead of oversetting the frame. Works on each frame's
+// STORY — frame.paragraphs only covers the visible text, and the long
+// placeholders overset the frame — and reads every paragraph back. Stories
+// shared by threaded frames are handled once. Hyphenation is a paragraph
+// attribute, so it carries over to the real text Render writes in. InDesign
+// only hyphenates with a language dictionary, so the language is reported
+// and "[No Language]" is flagged.
+function prepareHyphenation(doc, page, field, entry) {
+    const frames = itemsOnLayer(page, LAYERS.text, isTextFrame)
+        .concat(parentItemsOnLayer(page, LAYERS.text, isTextFrame));
+    if (!frames.length) {
+        entry.notes.push(`hyphenation: no text frame on layer "${LAYERS.text}"`);
+        return;
+    }
+    const seen = new Set();
+    const failed = [];
+    const languages = new Set();
+    let stories = 0, enabled = 0, alreadyOn = 0;
+    for (const frame of frames) {
+        const story = step("read story", () => frame.parentStory);
+        let id = null;
+        try { id = story.id; } catch (e) {}
+        if (id !== null) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+        }
+        stories++;
+        const n = step("count paragraphs", () => story.paragraphs.length);
+        for (let i = 0; i < n; i++) {
+            try {
+                const para = story.paragraphs.item(i);
+                if (para.hyphenation === true) alreadyOn++;
+                else para.hyphenation = true;
+                // Read back from a fresh reference.
+                if (story.paragraphs.item(i).hyphenation === true) enabled++;
+                else failed.push(String(i));
+                try { languages.add(String(para.appliedLanguage.name)); } catch (e) {}
+            } catch (e) {
+                failed.push(`${i} (${e})`);
+            }
+        }
+    }
+    const langs = [...languages];
+    entry.notes.push(`hyphenation on: ${enabled} paragraph(s) in ${stories} text stor${stories === 1 ? "y" : "ies"} ` +
+        `on layer "${LAYERS.text}" (${alreadyOn} already on)` + (langs.length ? `; language: ${langs.join(", ")}` : ""));
+    if (langs.some((l) => /no language/i.test(l))) {
+        entry.notes.push(`⚠ warning: text has "[No Language]" — InDesign won't hyphenate it until a language (e.g. German) is applied`);
+    }
+    if (failed.length) throw new Error(`could not enable hyphenation for paragraph(s) ${failed.join(", ")}`);
 }
 
 function prepareImage(doc, page, field, entry) {
@@ -593,7 +657,10 @@ async function prepareActiveDocument(csvPath) {
     try { src = app.documents.length ? app.activeDocument : null; } catch (e) { src = null; }
     if (!src) throw new Error("No document is open — open the client .indd first.");
 
-    // Check layers on the client file (read-only) before making any copy.
+    // Template type and layers are checked on the client file (read-only)
+    // before any copy is made: a name without DANIS/SERVICE (or with both)
+    // stops here, exactly as it would in Render.
+    detectSubType(src.name);
     checkLayers(src);
 
     // doc.saved is deliberately not consulted — see resolveSourcePath().
@@ -686,7 +753,12 @@ async function prepareDocument(doc, csvPath) {
             const entry = { page: page.name, label: page.label || "", ok: true, notes: [] };
             report.push(entry);
 
-            for (const [what, step] of [["text", prepareText], ["footer", prepareFooter], ["image", prepareImage]]) {
+            for (const [what, step] of [
+                ["text", prepareText],
+                ["hyphenation", prepareHyphenation],
+                ["footer", prepareFooter],
+                ["image", prepareImage],
+            ]) {
                 try {
                     step(doc, page, field, entry);
                 } catch (e) {
