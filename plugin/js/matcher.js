@@ -18,16 +18,6 @@ const IMAGE_PREFERENCE = [/\(web_1080p\)\.jpe?g$/i];
 const EXCLUDE_PATTERNS = [/Bildschirmfoto/i, /^\./];
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".tif", ".tiff"]);
 
-// Accepted header texts (upper-cased) per field.
-const COLUMN_HEADERS = {
-    headline: ["DANIS + SERVICE HEADLINE +PRODUCT NAMING", "DANIS + SERVICE HEADLINE", "HEADLINE"],
-    picture: ["PICTURE NAME"],
-    danisSubline: ["DANIS SUBLINE", "DANIS_SUBLINE"],
-    danisAddOn: ["DANIS ADD ON"],
-    serviceSubline: ["SERVICE SUBLINE", "SERVICE_SUBLINE"],
-    year: ["YEAR"],
-};
-
 const MATCH_THRESHOLD = 0.6;
 const CONTAINMENT_SCORE = 0.95;
 
@@ -106,51 +96,34 @@ function sequenceMatcherRatio(a, b) {
     return (2.0 * matches) / (a.length + b.length);
 }
 
-// ---------- Excel / CSV reading ----------
+// ---------- Excel reading ----------
 
-// Supported input:
-//   .xlsx / .xls -> uses the existing AOZ+AOT worksheet
-//   .csv         -> uses the first worksheet produced by SheetJS
-//
-// Columns are looked up by header text (see COLUMN_HEADERS), so the sheet
-// layout can change without breaking the reader. If the header row isn't
-// recognised, falls back to the old positional layout:
-//   headline | danis_subline | service_subline
-async function readDataRows(dataEntry) {
-    const lowerName = String(dataEntry.name || "").toLowerCase();
-    let wb;
-
-    if (lowerName.endsWith(".csv")) {
-        const text = await dataEntry.read();
-        wb = XLSX.read(text, { type: "string" });
-    } else {
-        const buffer = await dataEntry.read({ format: require("uxp").storage.formats.binary });
-        wb = XLSX.read(buffer, { type: "array" });
-    }
-
-    let ws;
-    if (lowerName.endsWith(".csv")) {
-        const firstSheet = wb.SheetNames && wb.SheetNames[0];
-        if (!firstSheet) throw new Error(`No worksheet/data found in ${dataEntry.name}`);
-        ws = wb.Sheets[firstSheet];
-    } else {
-        ws = wb.Sheets[SHEET_NAME];
-        if (!ws) throw new Error(`Sheet "${SHEET_NAME}" not found in ${dataEntry.name}`);
-    }
+async function readExcelRows(excelEntry) {
+    const buffer = await excelEntry.read({ format: require("uxp").storage.formats.binary });
+    const wb = XLSX.read(buffer, { type: "array" });
+    const ws = wb.Sheets[SHEET_NAME];
+    if (!ws) throw new Error(`Sheet "${SHEET_NAME}" not found in ${excelEntry.name}`);
 
     const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
     if (!raw.length) return [];
 
+    // Columns are looked up by header text rather than position, since the
+    // sheet layout has already changed once (picture name / add-on / year
+    // columns were inserted between the sublines).
     const header = raw[0].map((h) => String(h).trim().toUpperCase());
-    const COLS = {};
-    for (const key in COLUMN_HEADERS) {
-        COLS[key] = header.findIndex((h) => COLUMN_HEADERS[key].includes(h));
-    }
-    if (COLS.danisSubline === -1 && COLS.serviceSubline === -1) {
-        // Header not recognised — old positional layout.
-        Object.assign(COLS, { headline: 0, danisSubline: 1, serviceSubline: 2 });
-    }
+    const col = (name) => header.indexOf(name);
+    const COLS = {
+        headline: col("DANIS + SERVICE HEADLINE +PRODUCT NAMING"),
+        picture: col("PICTURE NAME"),
+        danisSubline: col("DANIS SUBLINE"),
+        danisAddOn: col("DANIS ADD ON"),
+        serviceSubline: col("SERVICE SUBLINE"),
+        year: col("YEAR"),
+    };
     if (COLS.headline === -1) COLS.headline = 0;
+    for (const key of ["danisSubline", "serviceSubline"]) {
+        if (COLS[key] === -1) throw new Error(`Column for "${key}" not found in sheet "${SHEET_NAME}"`);
+    }
 
     // "n/a" in the sheet means "no text for this field".
     const cell = (row, idx) => {
@@ -252,11 +225,11 @@ function matchHeadlineToFolder(headline, folders) {
 
 // ---------- main entry point ----------
 
-// dataEntry: UXP .xlsx/.xls/.csv file Entry (picked via getFileForOpening)
+// excelEntry: UXP file Entry (picked via getFileForOpening)
 // picturesFolderEntry: UXP folder Entry (picked via getFolder)
 // Returns: array of { headline, danis_subline, service_subline, imagePath, imageEntry, status, notes }
-async function buildManifest(dataEntry, picturesFolderEntry) {
-    const excelRows = await readDataRows(dataEntry);
+async function buildManifest(excelEntry, picturesFolderEntry) {
+    const excelRows = await readExcelRows(excelEntry);
     const folders = await listProductFolders(picturesFolderEntry);
     const allFiles = (await walkFiles(picturesFolderEntry))
         .filter((f) => !EXCLUDE_PATTERNS.some((p) => p.test(f.name)));
@@ -265,8 +238,8 @@ async function buildManifest(dataEntry, picturesFolderEntry) {
     const manifestRows = [];
 
     for (const row of excelRows) {
-        // The sheet names the exact picture file (without extension), so use
-        // that directly when present instead of fuzzy folder matching.
+        // New sheet layout names the exact picture file (without extension),
+        // so use that directly when present instead of fuzzy folder matching.
         if (row.picture_name) {
             const wanted = row.picture_name.toLowerCase();
             const image = allFiles.find((f) => {

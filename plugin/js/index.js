@@ -202,7 +202,7 @@ el.btnMerge.addEventListener("click", async () => {
 el.btnExcel.addEventListener("click", async () => {
     let entry;
     try {
-        entry = await fs.getFileForOpening({ types: ["xlsx", "xls", "csv"] });
+        entry = await fs.getFileForOpening({ types: ["xlsx"] });
     } catch (e) {
         el.excelPath.textContent = "Error: " + e;
         return;
@@ -298,16 +298,10 @@ el.btnGenerate.addEventListener("click", async () => {
     el.progressLabel.textContent = "Starting…";
 
     try {
-        // New workflow: if the user selected Service_Template.indd and
-        // Denis_Template.indd, render directly from those two files.
-        // Keep the legacy Poster_Master.indd fallback for old projects.
-        const templatePaths = inddFileEntries.length
-            ? inddFileEntries.map((entry) => entry.nativePath)
-            : [await resolveMasterPath()];
-
+        const masterPath = await resolveMasterPath();
         const result = await render.renderAll(
             manifestRows,
-            templatePaths,
+            masterPath,
             outputEntry.nativePath,
             (done, total, message) => {
                 const pct = total ? Math.round((done / total) * 100) : 0;

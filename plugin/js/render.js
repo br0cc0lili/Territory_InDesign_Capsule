@@ -19,7 +19,8 @@
 // log writing go through require("uxp").storage.localFileSystem instead,
 // since there's no Folder(path).create() equivalent either.
 //
-// The master template file is only ever duplicated in memory, never saved over.
+// The master template file is never saved over: each product opens its own
+// copy, which is saved-as into that product's output folder and then closed.
 
 /* global require */
 // Not just lazy but self-healing: on the very first call(s) after panel load,
@@ -66,30 +67,13 @@ async function pathExists(path) {
 
 const AUDI_FONT_NAME = "Audi Type\tExtended Bold";
 
-// Page label -> output config.
-//
-// Two source INDD files are expected:
-//   Service_Template.indd -> 7 labelled pages
-//   Denis_Template.indd   -> 3 labelled pages
-//
-// All normal layouts keep headline + subline in the same <<Headline>> frame.
-// The Denis split layout uses two frames: <<Headline>> and <<Subline>>.
-//
+// Page label -> output config (identical to 02_generate_posters.jsx)
 // `position` is the last part of the output file name (up / bottom / footer).
-// The two Service 1200x1200 top variants get up-a / up-b so they never
-// overwrite each other.
 const PAGE_CONFIG = {
-    "service_1200x1200_top_a": { textPos: "texttop",    position: "up-a",   subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
-    "service_1200x1200_top_b": { textPos: "texttop",    position: "up-b",   subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
-    "service_1080x1920_top":   { textPos: "texttop",    position: "up",     subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
-    "service_1080x1920_bottom":{ textPos: "textbottom", position: "bottom", subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
-    "service_800x600_top":     { textPos: "texttop",    position: "up",     subType: "service", textLayout: "stacked", w: 800,  h: 600  },
-    "service_800x600_bottom":  { textPos: "textbottom", position: "bottom", subType: "service", textLayout: "stacked", w: 800,  h: 600  },
-    "service_250x250_top":     { textPos: "texttop",    position: "up",     subType: "service", textLayout: "stacked", w: 250,  h: 250  },
-
-    "denis_1200x1200_top":     { textPos: "texttop",    position: "up",     subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
-    "denis_1200x1200_bottom":  { textPos: "textbottom", position: "bottom", subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
-    "denis_1200x1200_split":   { textPos: "split",      position: "footer", subType: "denis",   textLayout: "split",   w: 1200, h: 1200 },
+    "top_service":      { textPos: "texttop",    position: "up",     subType: "service", w: 1200, h: 1200 },
+    "top_denis":        { textPos: "texttop",    position: "up",     subType: "denis",   w: 1200, h: 1200 },
+    "bottom_denis":     { textPos: "textbottom", position: "bottom", subType: "denis",   w: 1200, h: 1200 },
+    "9x16_top_service": { textPos: "texttop",    position: "up",     subType: "service", w: 1080, h: 1920 },
 };
 
 // File name prefix per subline type.
@@ -220,10 +204,6 @@ function findHeadlineFrame(page) {
     return findItemByName(page.allPageItems, "<<Headline>>");
 }
 
-function findSublineFrame(page) {
-    return findItemByName(page.allPageItems, "<<Subline>>");
-}
-
 function setHeadlineText(frame, headline, subline) {
     itemAt(frame.paragraphs, 0).contents = headline;
     if (frame.paragraphs.length > 1) {
@@ -232,11 +212,6 @@ function setHeadlineText(frame, headline, subline) {
         const ips = frame.insertionPoints;
         itemAt(ips, ips.length - 1).contents = "\r" + subline;
     }
-}
-
-function setSplitText(headlineFrame, sublineFrame, headline, subline) {
-    headlineFrame.contents = headline;
-    sublineFrame.contents = subline;
 }
 
 // Places the image and frames it with InDesign's Content-Aware Fit (Adobe
@@ -269,144 +244,180 @@ function exportPageAsJPEG(doc, page, outputPath) {
     doc.exportFile(ExportFormat.JPG, outputPath, false);
 }
 
+// ---------- per-product document lifecycle ----------
+
+// Lets InDesign finish tearing down the previously closed document before the
+// next app.open() lands. Back-to-back open/close cycles without a pause are
+// what produced the intermittent "Object is invalid" errors noted below.
+function settle(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Opens a fresh, independent working copy of the master template. Prefers
+// OpenOptions.OPEN_COPY (an untitled doc with no link back to the master
+// file, so even an accidental doc.save() can't touch it); falls back to a
+// normal open if that enum isn't exposed in this InDesign version — the
+// workflow below only ever save-as's to a new path, so the master is still
+// never written either way.
+async function openMasterCopy(masterPath) {
+    const { app, OpenOptions } = indesign();
+    const openCopy = OpenOptions && OpenOptions.OPEN_COPY;
+    let lastErr = null;
+    // One retry: the very first open after a close is the one most likely to
+    // hit a half-torn-down previous document.
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            return openCopy ? app.open(masterPath, false, openCopy) : app.open(masterPath, false);
+        } catch (e) {
+            lastErr = e;
+            await settle(500);
+        }
+    }
+    throw lastErr;
+}
+
+function closeWithoutSaving(doc) {
+    const { SaveOptions } = indesign();
+    try {
+        if (doc && doc.isValid !== false) doc.close(SaveOptions.NO || SaveOptions.no);
+    } catch (closeErr) {}
+}
+
+function samePath(a, b) {
+    return String(a).replace(/\/+$/, "").toLowerCase() === String(b).replace(/\/+$/, "").toLowerCase();
+}
+
 // ---------- main render loop ----------
 
 // manifestRows: array from matcher.js's buildManifest() (only "matched" rows are rendered)
-// templatePaths: one path or an array of .indd template paths. The new workflow
-//                passes Service_Template.indd + Denis_Template.indd directly.
+// masterPath: absolute path to Poster_Master.indd
 // outputRootPath: absolute path to the chosen output folder
 // onProgress: optional callback(current, total, message) for UI progress updates
 // Returns: { successCount, errorCount, logLines: string[], failures: [{headline, label, message}] }
-async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress) {
-    const { app, SaveOptions } = indesign();
+//
+// Each product gets its own document: a fresh copy of the master is opened,
+// populated, exported to JPG (one per PAGE_CONFIG label), saved as an
+// editable <product>.indd into that product's output folder, then closed
+// before the next product starts. The master template itself is never saved.
+async function renderAll(manifestRows, masterPath, outputRootPath, onProgress) {
     const logLines = ["timestamp,headline,page_label,output_file,status,message"];
     const failures = [];
-
-    const paths = Array.isArray(templatePaths) ? templatePaths : [templatePaths];
-    const cleanPaths = paths.filter(Boolean);
-    if (cleanPaths.length === 0) {
-        throw new Error("No InDesign template file was provided.");
-    }
-    for (const path of cleanPaths) {
-        if (!(await pathExists(path))) {
-            throw new Error("Template not found: " + path);
-        }
+    if (!(await pathExists(masterPath))) {
+        throw new Error("Master template not found: " + masterPath);
     }
 
     await ensureFolder(outputRootPath);
 
+    const labels = Object.keys(PAGE_CONFIG);
     const matchedRows = manifestRows.filter((r) => r.status === "matched");
-    const totalOps = matchedRows.length * Object.keys(PAGE_CONFIG).length;
+    // One op per JPG plus one for the product's INDD save.
+    const totalOps = matchedRows.length * (labels.length + 1);
     let done = 0;
     let successCount = 0;
     let errorCount = 0;
 
-    // Open each selected template only once. Pages can come from either the
-    // Service or Denis INDD; page labels are the stable IDs used below.
-    const docs = [];
-    try {
-        const pageByLabel = {};
-        const duplicateLabels = [];
+    const logSuccess = (headline, label, outPath, note) => {
+        logLines.push([new Date().toISOString(), headline, label, outPath, "success", note || ""].join(","));
+        successCount++;
+    };
+    const logError = (headline, label, outPath, e) => {
+        logLines.push([new Date().toISOString(), headline, label, outPath, "error", String(e).replace(/,/g, ";")].join(","));
+        errorCount++;
+        failures.push({ headline, label, message: String(e) });
+    };
+    const tick = (message) => {
+        done++;
+        if (onProgress) onProgress(done, totalOps, message);
+    };
+    // Marks every remaining op for a product (all JPG labels + the INDD) as failed.
+    const skipProduct = (headline, e) => {
+        for (const label of labels) {
+            logError(headline, label, "", e);
+            tick(`${headline} — ${label} (skipped)`);
+        }
+        logError(headline, "indd", "", e);
+        tick(`${headline} — indd (skipped)`);
+    };
 
-        for (const path of cleanPaths) {
-            const doc = app.open(path, false);
-            docs.push(doc);
+    for (const rec of matchedRows) {
+        const headline = rec.headline;
+        const sanitized = sanitizeHeadline(headline);
+        const imagePath = rec.imagePath;
 
-            for (let p = 0; p < doc.pages.length; p++) {
-                const pg = doc.pages.item(p);
-                const label = String(pg.label || "");
-                if (!label) continue;
-                if (pageByLabel[label]) duplicateLabels.push(label);
-                pageByLabel[label] = { page: pg, doc };
-            }
+        let outDir;
+        try {
+            outDir = await ensureFolder(outputRootPath + "/" + sanitized);
+        } catch (e) {
+            // Can't create this product's output folder — skip it rather
+            // than aborting the rest of the batch.
+            skipProduct(headline, e);
+            continue;
         }
 
-        if (duplicateLabels.length) {
-            throw new Error("Duplicate page label(s) across template files: " + [...new Set(duplicateLabels)].join(", "));
+        const inddPath = outDir.nativePath + "/" + sanitized + ".indd";
+        if (samePath(inddPath, masterPath)) {
+            skipProduct(headline, new Error("Refusing to overwrite master template: " + inddPath));
+            continue;
         }
 
-        const missingLabels = Object.keys(PAGE_CONFIG).filter((label) => !pageByLabel[label]);
-        if (missingLabels.length) {
-            throw new Error(
-                "Template page label(s) missing: " + missingLabels.join(", ") +
-                ". Check Service_Template.indd / Denis_Template.indd page labels."
-            );
-        }
-
-        for (const rec of matchedRows) {
-            const headline = rec.headline;
-            const sanitized = sanitizeHeadline(headline);
-            const imagePath = rec.imagePath;
-
-            let outDir;
+        let doc = null;
+        try {
             try {
-                outDir = await ensureFolder(outputRootPath + "/" + sanitized);
+                doc = await openMasterCopy(masterPath);
             } catch (e) {
-                for (const label in PAGE_CONFIG) {
-                    if (!PAGE_CONFIG.hasOwnProperty(label)) continue;
-                    logLines.push([new Date().toISOString(), headline, label, "", "error", String(e).replace(/,/g, ";")].join(","));
-                    errorCount++;
-                    failures.push({ headline, label, message: String(e) });
-                    done++;
-                    if (onProgress) onProgress(done, totalOps, `${headline} — ${label} (skipped)`);
-                }
+                skipProduct(headline, new Error("Could not open master template: " + e));
                 continue;
             }
 
-            for (const label in PAGE_CONFIG) {
-                if (!PAGE_CONFIG.hasOwnProperty(label)) continue;
+            // Page references are per-document, so resolve them fresh for
+            // every product's copy.
+            const pageByLabel = {};
+            for (let p = 0; p < doc.pages.length; p++) {
+                const pg = doc.pages.item(p);
+                pageByLabel[pg.label] = pg;
+            }
+
+            for (const label of labels) {
                 const cfg = PAGE_CONFIG[label];
                 const subline = cfg.subType === "denis" ? rec.danis_subline : rec.service_subline;
-
                 const outFileName = buildOutputFileName(rec, cfg);
                 const outPath = outDir.nativePath + "/" + outFileName;
 
                 try {
-                    const target = pageByLabel[label];
-                    const targetPage = target.page;
-                    const targetDoc = target.doc;
+                    const targetPage = pageByLabel[label];
+                    if (!targetPage) throw new Error("Page label not found: " + label);
 
                     const allItems = targetPage.allPageItems;
-                    for (let ai = 0; ai < allItems.length; ai++) {
-                        itemAt(allItems, ai).visible = true;
-                    }
+                    for (let ai = 0; ai < allItems.length; ai++) { itemAt(allItems, ai).visible = true; }
 
                     const headlineFrame = findHeadlineFrame(targetPage);
-                    if (!headlineFrame) {
-                        throw new Error("<<Headline>> frame not found on page " + label);
-                    }
-
-                    if (cfg.textLayout === "split") {
-                        const sublineFrame = findSublineFrame(targetPage);
-                        if (!sublineFrame) {
-                            throw new Error("<<Subline>> frame not found on split page " + label);
-                        }
-                        setSplitText(headlineFrame, sublineFrame, headline, subline);
-                    } else {
-                        setHeadlineText(headlineFrame, headline, subline);
-                    }
+                    if (!headlineFrame) throw new Error("Headline frame not found on page " + label);
+                    setHeadlineText(headlineFrame, headline, subline);
 
                     const imageFrame = findImageFrame(targetPage);
-                    if (!imageFrame) throw new Error("<<MainImage>> frame not found on page " + label);
+                    if (!imageFrame) throw new Error("Image frame not found on page " + label);
                     const fitNote = placeImageFill(imageFrame, imagePath);
 
-                    exportPageAsJPEG(targetDoc, targetPage, outPath);
-
-                    logLines.push([new Date().toISOString(), headline, label, outPath, "success", fitNote].join(","));
-                    successCount++;
+                    exportPageAsJPEG(doc, targetPage, outPath);
+                    logSuccess(headline, label, outPath, fitNote);
                 } catch (e) {
-                    logLines.push([new Date().toISOString(), headline, label, outPath, "error", String(e).replace(/,/g, ";")].join(","));
-                    errorCount++;
-                    failures.push({ headline, label, message: String(e) });
+                    logError(headline, label, outPath, e);
                 }
-
-                done++;
-                if (onProgress) onProgress(done, totalOps, `${headline} — ${label}`);
+                tick(`${headline} — ${label}`);
             }
-        }
-    } finally {
-        for (let i = docs.length - 1; i >= 0; i--) {
-            try { docs[i].close(SaveOptions.no); } catch (closeErr) {}
+
+            // Save-as to the product folder: writes a new file and leaves the
+            // master template untouched.
+            try {
+                doc.save(inddPath);
+                logSuccess(headline, "indd", inddPath);
+            } catch (e) {
+                logError(headline, "indd", inddPath, e);
+            }
+            tick(`${headline} — indd`);
+        } finally {
+            closeWithoutSaving(doc);
+            await settle(250);
         }
     }
 
