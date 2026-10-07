@@ -8,7 +8,10 @@
 //   <<Footer>>    : optional, whole text = DANIS ADD ON
 //   <<MainImage>> : product image
 // Pages need no labels: size comes from the page itself, DANIS vs Service
-// from the template's file name (same rule as datamerge.js).
+// from the template's file name (same rule as datamerge.js). Which pages are
+// exported is fixed by the DANIS/Service output rules below; each product's
+// populated document is saved once to InDesign/<type>/ and its JPGs are
+// exported to output/<type>/<WxH>/ (see renderAll).
 //
 // require("indesign") is called lazily (inside functions, not at module top)
 // so that if it's ever unavailable, only render actions fail — the rest of
@@ -74,15 +77,47 @@ const AUDI_FONT_NAME = "Audi Type\tExtended Bold";
 
 // Output file name prefix per subline type.
 const PROJECT_PREFIX = {
-    denis: "DANIS_Herbst",
+    danis: "DANIS_Herbst",
     service: "Service_Herbst",
 };
 
 // Frame names written by datamerge.js's Prepare step.
 const FRAME_NAMES = { text: "<<Headline>>", footer: "<<Footer>>", image: "<<MainImage>>" };
 
-// Pages up to this size (px at the 72 dpi export) are named "thumbnail".
-const THUMBNAIL_MAX = 250;
+// Folder names per template type, used under the selected output root:
+//   output/<DANIS|Service>/<WxH>/<…>.jpg       (exported JPGs)
+//   InDesign/<DANIS|Service>/<…>.indd           (one populated INDD per product)
+const TYPE_FOLDER = { danis: "DANIS", service: "Service" };
+
+// Output rules — the exact layouts each template must contain, per page
+// size. Every page must fill exactly one slot: a missing required layout, a
+// duplicate, an unexpected size or variant is a template error (no guessing).
+//
+//   DANIS   1200x1200 : up, bottom     always exported
+//                       footer         only when DANIS ADD ON has real content;
+//                                      otherwise that page is removed from the
+//                                      product's working document, so the
+//                                      INDD matches the JPGs   -> 2 or 3 JPGs
+//   Service 250x250   : thumbnail
+//           800x600   : up, bottom
+//           1080x1920 : up, bottom
+//           1200x1200 : up, bottom                              -> 7 JPGs
+//
+// Variants: footer = DANIS page with a <<Footer>> frame; thumbnail = the
+// Service 250x250 page (historical name, kept); otherwise up/bottom from the
+// headline frame's position (upper / lower half of the page).
+const OUTPUT_RULES = {
+    danis: {
+        "1200x1200": { required: ["up", "bottom"], optional: ["footer"] },
+    },
+    service: {
+        "250x250": { required: ["thumbnail"], optional: [] },
+        "800x600": { required: ["up", "bottom"], optional: [] },
+        "1080x1920": { required: ["up", "bottom"], optional: [] },
+        "1200x1200": { required: ["up", "bottom"], optional: [] },
+    },
+};
+const SERVICE_THUMBNAIL_SIZE = "250x250";
 
 // Temporary diagnostic: dumps the top-level keys of require("indesign") so we
 // can confirm the real names/shape of enums like FontStatuses, SaveOptions,
@@ -144,30 +179,48 @@ function checkAudiFont() {
 
 // ---------- helpers (ported 1:1 from 02_generate_posters.jsx) ----------
 
-function sanitizeHeadline(headline) {
-    let s = headline.replace(/\s+/g, "_");
-    s = s.replace(/[\/\\:\*\?"<>\|]/g, "");
+// Product token used in BOTH JPG and INDD file names (one rule, no
+// per-example tweaks):
+//   - trim; drop characters illegal in file names, and "_" (the field
+//     separator in our names)
+//   - name already contains a hyphen -> spaces become hyphens, repeated
+//     hyphens collapse to one
+//   - otherwise spaces are removed
+//   - existing hyphens and numeric suffixes are kept
+//   "Audi Airport Service"      -> "AudiAirportService"
+//   "Ski- und Snowboardhalter1" -> "Ski-und-Snowboardhalter1"
+function productToken(headline) {
+    let s = String(headline).trim().replace(/[\/\\:\*\?"<>\|_]/g, "");
+    if (s.indexOf("-") !== -1) {
+        s = s.replace(/\s+/g, "-").replace(/-{2,}/g, "-");
+    } else {
+        s = s.replace(/\s+/g, "");
+    }
     return s;
 }
 
-// Headline as used inside output file names: spaces removed (so "_" stays a
-// clean field separator), trailing footnote digits dropped
-// ("Ski- und Snowboardhalter1" -> "Ski-undSnowboardhalter").
-function fileNameHeadline(headline) {
-    let s = headline.replace(/\d+$/, "").replace(/\s+/g, "");
-    s = s.replace(/[\/\\:\*\?"<>\|_]/g, "");
-    return s;
-}
-
-// <DANIS_Herbst|Service_Herbst>_<year>_<headline>_<WxH>_<up|bottom|footer|thumbnail>.jpg
+// <DANIS_Herbst|Service_Herbst>_<year>_<product>_<WxH>_<up|bottom|footer|thumbnail>.jpg
 function buildOutputFileName(rec, layout) {
     return [
         PROJECT_PREFIX[layout.subType],
         rec.year,
-        fileNameHeadline(rec.headline),
-        `${layout.w}x${layout.h}`,
+        productToken(rec.headline),
+        layout.size,
         layout.position,
     ].join("_") + ".jpg";
+}
+
+// <DANIS_Herbst|Service_Herbst>_<year>_<product>.indd — one per product and
+// type; never contains a resolution or variant.
+function buildInddFileName(rec, subType) {
+    return [PROJECT_PREFIX[subType], rec.year, productToken(rec.headline)].join("_") + ".indd";
+}
+
+// DANIS ADD ON counts only with real content ("n/a" is already "" from
+// matcher.js; checked again here so the footer rule never depends on it).
+function hasAddOn(rec) {
+    const v = String(rec.danis_addon || "").trim();
+    return v !== "" && v.toLowerCase() !== "n/a";
 }
 
 // NOTE: InDesign's Collection-like objects are NOT consistent in this UXP DOM
@@ -209,14 +262,33 @@ function findHeadlineFrame(page) { return findNamed(page, FRAME_NAMES.text, isTe
 function findFooterFrame(page) { return findNamed(page, FRAME_NAMES.footer, isTextFrame); }
 function findImageFrame(page) { return findNamed(page, FRAME_NAMES.image, (it) => !isTextFrame(it)); }
 
-// "DANIS" vs "Service" from the template's file name (same rule as
-// datamerge.js). The name of the opened copy can't be used: OPEN_COPY makes
-// it "Untitled-N".
+// Shared DANIS/Service rule (templatetype.js). Loaded lazily, module-relative
+// path first, plugin-root path second: no other module here loads a sibling
+// yet, and index.js documents root-anchored require() resolution for itself,
+// so both are tried. If neither loads, only template classification fails —
+// with a clear error — not the whole module.
+let _templateType = null;
+function templateType() {
+    if (_templateType) return _templateType;
+    const errors = [];
+    for (const path of ["./templatetype.js", "./js/templatetype.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.detectTemplateType === "function") return (_templateType = mod);
+            errors.push(`${path}: no detectTemplateType`);
+        } catch (e) {
+            errors.push(`${path}: ${e}`);
+        }
+    }
+    throw new Error("Could not load templatetype.js (" + errors.join("; ") + ")");
+}
+
+// Template type ("danis" -> output/DANIS + InDesign/DANIS, "service" ->
+// output/Service + InDesign/Service) from the template's file name, via the
+// rule shared with datamerge.js. Throws if the name has neither or both.
+// The name of the opened copy can't be used: OPEN_COPY makes it "Untitled-N".
 function subTypeFromPath(path) {
-    const n = String(path).split("/").pop().toLowerCase();
-    if (n.indexOf("service") !== -1) return "service";
-    if (n.indexOf("denis") !== -1 || n.indexOf("danis") !== -1) return "denis";
-    return null;
+    return templateType().detectTemplateType(path);
 }
 
 // Our working copy only: unlock layers and items so frames can be filled.
@@ -239,96 +311,280 @@ function usePoints(doc) {
     } catch (e) {}
 }
 
-// { subType, w, h, position } for one template page.
-//   thumbnail : page no larger than THUMBNAIL_MAX
-//   footer    : page has a <<Footer>> frame (layout with a top and a bottom part)
-//   up/bottom : headline frame in the upper / lower half of the page
+// { subType, w, h, size, position, key } for one page (variants: see
+// OUTPUT_RULES). key is the rule name, e.g. "danis_up", "service_thumbnail".
 function pageLayout(page, subType) {
     const b = page.bounds; // [y1, x1, y2, x2]
     const w = Math.round(Number(b[3]) - Number(b[1]));
     const h = Math.round(Number(b[2]) - Number(b[0]));
     let position;
-    if (w <= THUMBNAIL_MAX && h <= THUMBNAIL_MAX) {
-        position = "thumbnail";
-    } else if (findFooterFrame(page)) {
+    if (subType === "danis" && findFooterFrame(page)) {
         position = "footer";
+    } else if (subType === "service" && `${w}x${h}` === SERVICE_THUMBNAIL_SIZE) {
+        position = "thumbnail";
     } else {
         const g = findHeadlineFrame(page).geometricBounds;
         const frameMid = (Number(g[0]) + Number(g[2])) / 2;
         const pageMid = (Number(b[0]) + Number(b[2])) / 2;
         position = frameMid < pageMid ? "up" : "bottom";
     }
-    return { subType, w, h, position };
+    return { subType, w, h, size: `${w}x${h}`, position, key: `${subType}_${position}` };
+}
+
+// Detected size -> variants of a document, e.g. "250x250: thumbnail |
+// 800x600: up, bottom | …" — for the log and error messages.
+function describeMapping(pages) {
+    const bySize = {};
+    for (const pg of pages) (bySize[pg.layout.size] = bySize[pg.layout.size] || []).push(pg.layout.position);
+    return Object.keys(bySize).map((sz) => `${sz}: ${bySize[sz].join(", ")}`).join(" | ") || "(no pages)";
+}
+
+// Classifies every page (fresh references) and checks the result against
+// OUTPUT_RULES. Every valid page is exported. Returns { pages: [{index,
+// layout, export}], mapping, problems: string[] }.
+function planPages(doc, subType) {
+    const pages = [];
+    for (let p = 0; p < doc.pages.length; p++) {
+        pages.push({ index: p, layout: pageLayout(doc.pages.item(p), subType), export: true });
+    }
+    const rules = OUTPUT_RULES[subType];
+    const problems = [];
+    const seen = {};
+    for (const pg of pages) {
+        const { size, position } = pg.layout;
+        const rule = rules[size];
+        if (!rule) {
+            problems.push(`page ${pg.index + 1}: unexpected size ${size} (expected ${Object.keys(rules).join(", ")})`);
+        } else if (rule.required.concat(rule.optional).indexOf(position) === -1) {
+            problems.push(`page ${pg.index + 1}: ${size} has no "${position}" variant ` +
+                `(expected ${rule.required.concat(rule.optional).join(", ")})`);
+        } else if (seen[size + position]) {
+            problems.push(`page ${pg.index + 1}: second ${size} "${position}" page`);
+        }
+        seen[size + position] = true;
+    }
+    for (const size of Object.keys(rules)) {
+        for (const position of rules[size].required) {
+            if (!seen[size + position]) problems.push(`missing ${size} "${position}" page`);
+        }
+    }
+    if (problems.length) problems.push(`detected: ${describeMapping(pages)}`);
+    return { pages, mapping: describeMapping(pages), problems };
 }
 
 // ---------- text replacement ----------
 //
-// Same story-offset approach as datamerge.js (ranges and paragraph objects
-// held across an edit come back "Object is invalid" in this UXP DOM). The
-// first old character is overwritten rather than deleted, so the new text
-// keeps the template's formatting; the paragraph return is kept.
-
-function endsWithReturn(text) {
-    try {
-        const chars = text.characters;
-        return chars.length > 0 && String(chars.item(chars.length - 1).contents) === "\r";
-    } catch (e) {
-        return false;
-    }
-}
+// Headline, subline and footer are all written by replacing whole
+// paragraphs (see "headline + subline" below for why character-level edits
+// are not used).
+//
+// All reading and writing goes through the frame's STORY, never the frame
+// itself: frame.paragraphs / frame.contents only cover the text that is
+// VISIBLE in the frame. In the prepared templates the long placeholder
+// <<DANIS + SERVICE HEADLINE +PRODUCT NAMING>> oversets the frame, so the
+// subline paragraph is hidden in the overset part — the frame showed 1
+// paragraph, and writing a short headline pulled the subline back in
+// (1 -> 2), a long one pushed it out (2 -> 1). The story always holds the
+// whole text, so paragraph indices and counts stay stable.
 
 function paragraphText(para) {
     return String(para.contents).replace(/[\r\n\u2028\u2029]/g, "").trim();
 }
 
-function nonEmptyParagraphs(frame) {
+// Non-empty paragraph indices of `text` — a Story (always pass the story,
+// see above), or any object with .paragraphs.
+function nonEmptyParagraphs(text) {
     const out = [];
-    const paras = frame.paragraphs;
+    const paras = text.paragraphs;
     for (let i = 0; i < paras.length; i++) {
         if (paragraphText(paras.item(i)) !== "") out.push(i);
     }
     return out;
 }
 
-function replaceRange(story, start, count, text) {
-    if (count > 0 && text) {
-        story.characters.item(start).contents = text;
-        for (let k = 1; k < count; k++) story.characters.item(start + text.length).remove();
-    } else if (count > 0) {
-        for (let k = 0; k < count; k++) story.characters.item(start).remove();
-    } else if (text) {
-        story.insertionPoints.item(start).contents = text;
-    }
-}
+// ---------- headline + subline ----------
+//
+// The prepared templates hold native Data Merge placeholders
+// (<<DANIS + SERVICE HEADLINE +PRODUCT NAMING>>, <<SERVICE SUBLINE>> …).
+// The previous replaceRange() edited character by character — overwrite the
+// first char, then delete the rest one at a time — and inside a placeholder
+// that is unreliable: the output kept placeholder tails ("Audi Airport Service>",
+// "Audi Original ServiceE>>") or the whole placeholder ("<<SERVICE SUBLINE>>").
+//
+// So each paragraph is replaced as a whole (paragraph.contents covers the
+// complete placeholder, never part of it), every Paragraph reference is
+// re-resolved after each story change, and the result is read back and
+// verified. Formatting: the new text takes the formatting of the replaced
+// paragraph's first character, i.e. the template's headline/subline style.
 
-function setParagraphText(frame, paraIndex, text) {
-    const para = frame.paragraphs.item(paraIndex);
-    const count = para.characters.length - (endsWithReturn(para) ? 1 : 0);
-    replaceRange(para.parentStory, para.index, count, text);
-}
+// Temporary: writes before/after text + placeholder diagnostics for every
+// headline frame into the generation log (and the UXP console).
+const TEXT_DIAGNOSTICS = true;
 
-// Headline + subline into <<Headline>>. Subline first: it sits later in the
-// story, so the headline's paragraph index stays valid.
-function setHeadlineText(frame, headline, subline) {
-    const idx = nonEmptyParagraphs(frame);
-    if (!idx.length) throw new Error(FRAME_NAMES.text + " is empty — re-run Prepare (step 1)");
-    if (idx.length > 1) setParagraphText(frame, idx[1], subline);
-    setParagraphText(frame, idx[0], headline);
-}
-
-// Whole <<Footer>> text (from its first non-empty paragraph) -> `text`.
-function setFooterText(frame, text) {
-    const idx = nonEmptyParagraphs(frame);
+// Whole story text + paragraphs, plus whether the frame oversets.
+function textSnapshot(frame) {
     const story = frame.parentStory;
-    if (!idx.length) {
-        replaceRange(story, frame.insertionPoints.item(0).index, 0, text);
-        return;
+    let contents = "?";
+    try { contents = JSON.stringify(String(story.contents)); } catch (e) { contents = "ERR " + e; }
+    const paras = [];
+    try {
+        const n = story.paragraphs.length;
+        for (let i = 0; i < n; i++) paras.push(`[${i}]` + JSON.stringify(String(story.paragraphs.item(i).contents)));
+    } catch (e) {
+        paras.push("ERR " + e);
     }
-    const start = frame.paragraphs.item(idx[0]).index;
-    const paras = frame.paragraphs;
-    const last = paras.item(paras.length - 1);
-    const end = last.index + last.characters.length - (endsWithReturn(last) ? 1 : 0);
-    replaceRange(story, start, end - start, text);
+    let overset = "?";
+    try { overset = String(frame.overflows); } catch (e) {}
+    return `story=${contents} paragraphs=${paras.length} ${paras.join(" ")} overset=${overset}`;
+}
+
+// Native Data Merge text placeholders in the frame's story: "FIELD@offset".
+function placeholderSnapshot(doc, frame) {
+    const out = [];
+    try {
+        const storyId = frame.parentStory.id;
+        const phs = doc.dataMergeTextPlaceholders;
+        for (let i = 0; i < phs.length; i++) {
+            const ph = itemAt(phs, i);
+            try {
+                if (ph.parentStory.id !== storyId) continue;
+                const off = ph.storyOffset;
+                const at = typeof off === "number" ? off : off.index;
+                out.push(`${ph.field.fieldName}@${at}`);
+            } catch (e) {
+                out.push("ERR " + e);
+            }
+        }
+    } catch (e) {
+        out.push("ERR " + e);
+    }
+    return out.length ? out.join(" ") : "none";
+}
+
+// Removes the native placeholders in the frame's story (our working copy
+// only — the template file is never saved). Fallback when a whole-paragraph
+// replace still left placeholder text behind.
+function removePlaceholders(doc, frame) {
+    const storyId = frame.parentStory.id;
+    const phs = doc.dataMergeTextPlaceholders;
+    for (let i = phs.length - 1; i >= 0; i--) {
+        const ph = itemAt(phs, i);
+        try { if (ph.parentStory.id === storyId) ph.remove(); } catch (e) {}
+    }
+}
+
+// Replaces paragraph `paraIndex` of the frame's STORY with `text`, keeping
+// exactly the paragraph return it had. Returns true if the read-back text
+// matches.
+function replaceParagraph(frame, paraIndex, text) {
+    const story = frame.parentStory;
+    const countBefore = story.paragraphs.length;
+    const para = story.paragraphs.item(paraIndex);
+    const hadReturn = String(para.contents).endsWith("\r");
+    // The paragraph's range includes its own return, so writing text + "\r"
+    // keeps the headline/subline boundary even if the setter replaces the
+    // whole range.
+    para.contents = hadReturn ? text + "\r" : text;
+
+    // Re-resolve: if this DOM kept the original return as well, there is now
+    // one extra empty paragraph right after — remove only that return.
+    if (story.paragraphs.length === countBefore + 1) {
+        const extra = story.paragraphs.item(paraIndex + 1);
+        if (paragraphText(extra) === "") story.characters.item(extra.index).remove();
+    }
+    // Emptying the LAST paragraph (no return of its own) leaves nothing to
+    // count as a paragraph — expected for an empty subline/footer ("n/a").
+    const emptiedLast = !hadReturn && String(text) === "" && paraIndex === countBefore - 1;
+    if (emptiedLast && story.paragraphs.length === countBefore - 1) return true;
+    if (story.paragraphs.length !== countBefore) {
+        throw new Error(`paragraph count changed ${countBefore} -> ${story.paragraphs.length} ` +
+            `while writing paragraph ${paraIndex}`);
+    }
+    return paragraphText(story.paragraphs.item(paraIndex)) === String(text).trim();
+}
+
+function writeParagraph(doc, frame, paraIndex, text, what) {
+    if (replaceParagraph(frame, paraIndex, text)) return;
+    // Placeholder text survived the replace: drop the native placeholders and
+    // write once more.
+    removePlaceholders(doc, frame);
+    if (replaceParagraph(frame, paraIndex, text)) return;
+    throw new Error(`${what} not written correctly: got ` +
+        JSON.stringify(paragraphText(frame.parentStory.paragraphs.item(paraIndex))) +
+        ` expected ${JSON.stringify(String(text).trim())}`);
+}
+
+// Headline + subline into <<Headline>>: 1st / 2nd non-empty paragraph of the
+// same frame. Returns a diagnostics string ("" when TEXT_DIAGNOSTICS is off).
+function setHeadlineText(doc, frame, headline, subline) {
+    const before = TEXT_DIAGNOSTICS
+        ? `BEFORE ${textSnapshot(frame)} placeholders=${placeholderSnapshot(doc, frame)}`
+        : "";
+
+    const idx = nonEmptyParagraphs(frame.parentStory);
+    if (!idx.length) throw new Error(FRAME_NAMES.text + " is empty — re-run Prepare (step 1)");
+
+    try {
+        writeParagraph(doc, frame, idx[0], headline, "headline");
+        // Re-resolve after the story changed: never reuse a paragraph index or
+        // reference from before the headline write.
+        const after = nonEmptyParagraphs(frame.parentStory);
+        if (after.length > 1) writeParagraph(doc, frame, after[1], subline, "subline");
+    } catch (e) {
+        throw new Error(`${e}${before ? ` || ${before} || AFTER ${textSnapshot(frame)}` : ""}`);
+    }
+
+    if (!TEXT_DIAGNOSTICS) return "";
+    const diag = `${before} || AFTER ${textSnapshot(frame)} placeholders=${placeholderSnapshot(doc, frame)}`;
+    try { console.log("[setHeadlineText] " + diag); } catch (e) {}
+    return diag;
+}
+
+// ---------- footer ----------
+
+// Whole <<Footer>> text (from its first non-empty paragraph on) -> `text`,
+// with the same whole-paragraph strategy as the headline: later paragraphs
+// are removed as whole paragraphs (back to front, re-resolved each time),
+// then the first one is replaced as a whole — so a <<DANIS ADD ON>>
+// placeholder is never edited partially. `text` may be "" (n/a in the sheet).
+// Returns a diagnostics string ("" when TEXT_DIAGNOSTICS is off).
+function setFooterText(doc, frame, text) {
+    const before = TEXT_DIAGNOSTICS
+        ? `BEFORE ${textSnapshot(frame)} placeholders=${placeholderSnapshot(doc, frame)}`
+        : "";
+
+    const story = frame.parentStory;
+    try {
+        const idx = nonEmptyParagraphs(story);
+        if (!idx.length) {
+            // Empty footer frame: nothing to replace, so no placeholder either.
+            if (text) story.insertionPoints.item(0).contents = text;
+        } else {
+            const first = idx[0];
+            for (let k = story.paragraphs.length - 1; k > first; k--) {
+                story.paragraphs.item(k).remove();
+            }
+            // Removing the last paragraph can leave the previous return (an
+            // empty paragraph) behind — harmless; any remaining TEXT is not.
+            const leftover = nonEmptyParagraphs(story).filter((i) => i > first);
+            if (leftover.length) {
+                throw new Error(`could not clear footer paragraphs ${leftover.join(", ")}`);
+            }
+            writeParagraph(doc, frame, first, text, "footer");
+        }
+        const expected = String(text).trim();
+        const got = nonEmptyParagraphs(story).map((i) => paragraphText(story.paragraphs.item(i))).join(" ");
+        if (got !== expected) {
+            throw new Error(`footer not written correctly: got ${JSON.stringify(got)} expected ${JSON.stringify(expected)}`);
+        }
+    } catch (e) {
+        throw new Error(`${e}${before ? ` || ${before} || AFTER ${textSnapshot(frame)}` : ""}`);
+    }
+
+    if (!TEXT_DIAGNOSTICS) return "";
+    const diag = `${before} || AFTER ${textSnapshot(frame)} placeholders=${placeholderSnapshot(doc, frame)}`;
+    try { console.log("[setFooterText] " + diag); } catch (e) {}
+    return diag;
 }
 
 // Places the image and frames it with InDesign's Content-Aware Fit (Adobe
@@ -421,34 +677,276 @@ function samePath(a, b) {
     return String(a).replace(/\/+$/, "").toLowerCase() === String(b).replace(/\/+$/, "").toLowerCase();
 }
 
+// ---------- phase A: populate + validate ----------
+
+function basename(path) {
+    return String(path).split("/").pop();
+}
+
+function graphicInfo(frame) {
+    const info = { count: 0, link: "", path: "" };
+    try {
+        const g = frame.allGraphics;
+        info.count = g.length;
+        if (g.length) {
+            const link = itemAt(g, 0).itemLink;
+            try { info.link = String(link.name); } catch (e) {}
+            try { info.path = String(link.filePath); } catch (e) {}
+        }
+    } catch (e) {}
+    return info;
+}
+
+function countPlaceholders(doc) {
+    const n = { text: 0, image: 0 };
+    try { n.text = doc.dataMergeTextPlaceholders.length; } catch (e) {}
+    try { n.image = doc.dataMergeImagePlaceholders.length; } catch (e) {}
+    return n;
+}
+
+// Data Merge placeholder objects can't always be removed in this UXP DOM:
+// the image placeholders have no remove() ("itemAt(...).remove is not a
+// function" in the real test). So removal is best-effort and never throws —
+// the per-page validation (real image + real text) is what guards the save.
+function tryRemove(obj) {
+    try {
+        if (typeof obj.remove === "function") { obj.remove(); return true; }
+    } catch (e) {}
+    try {
+        if (typeof obj.getElements === "function") {
+            const el = obj.getElements()[0];
+            if (el && typeof el.remove === "function") { el.remove(); return true; }
+        }
+    } catch (e) {}
+    return false;
+}
+
+function removeAll(collection) {
+    try {
+        for (let i = collection.length - 1; i >= 0; i--) tryRemove(itemAt(collection, i));
+    } catch (e) {}
+}
+
+// Unbinds the native @MainImage placeholders in the working copy before
+// images are placed (frames stay), where the DOM allows it.
+function unbindImagePlaceholders(doc) {
+    removeAll(doc.dataMergeImagePlaceholders);
+}
+
+// After all text is written: drop remaining placeholder bindings and the
+// data source, so the saved INDD is a plain populated document, not a
+// Data Merge template. Validation runs afterwards and checks everything.
+function detachDataMerge(doc) {
+    removeAll(doc.dataMergeTextPlaceholders);
+    unbindImagePlaceholders(doc);
+    try { doc.dataMergeProperties.removeDataSource(); } catch (e) {}
+}
+
+// Text that doesn't fit its frame is not visible in the JPG.
+function oversets(frame) {
+    try { return frame.overflows === true; } catch (e) { return false; }
+}
+
+// Per-page check of the populated document. Returns { report, errors,
+// warnings }. Overset text is a warning, not an error: the story holds the
+// right text, but the layout can't show all of it.
+function validatePage(page, layout, rec, subline) {
+    const errors = [];
+    const warnings = [];
+    const parts = [`${layout.key} ${layout.size}`];
+
+    const imageFrame = findImageFrame(page);
+    if (!imageFrame) {
+        errors.push(`no ${FRAME_NAMES.image} frame`);
+        parts.push("image frame: none");
+    } else {
+        const g = graphicInfo(imageFrame);
+        parts.push(`image frame "${imageFrame.name}" graphics=${g.count} link=${g.link || "?"} path=${g.path || "?"}`);
+        if (g.count < 1) errors.push("MainImage frame is empty (no placed image)");
+        else if (g.link && basename(rec.imagePath).toLowerCase() !== g.link.toLowerCase()) {
+            errors.push(`placed image is ${g.link}, expected ${basename(rec.imagePath)}`);
+        }
+    }
+
+    const headlineFrame = findHeadlineFrame(page);
+    if (!headlineFrame) {
+        errors.push(`no ${FRAME_NAMES.text} frame`);
+    } else {
+        const story = headlineFrame.parentStory;
+        const idx = nonEmptyParagraphs(story);
+        const actualHeadline = idx.length ? paragraphText(story.paragraphs.item(idx[0])) : "";
+        const actualSubline = idx.length > 1 ? paragraphText(story.paragraphs.item(idx[1])) : "";
+        parts.push(`headline=${JSON.stringify(actualHeadline)} subline=${JSON.stringify(actualSubline)}`);
+        if (actualHeadline !== String(rec.headline).trim()) errors.push(`headline is ${JSON.stringify(actualHeadline)}`);
+        if (actualSubline !== String(subline || "").trim()) errors.push(`subline is ${JSON.stringify(actualSubline)}`);
+        if (idx.length > 2) errors.push(`${idx.length} non-empty paragraphs in ${FRAME_NAMES.text} (expected 2)`);
+        if (oversets(headlineFrame)) {
+            warnings.push(`${FRAME_NAMES.text} text doesn't fit its frame — part of the headline/subline is hidden in the JPG`);
+        }
+    }
+
+    const footerFrame = findFooterFrame(page);
+    if (footerFrame) {
+        const footerStory = footerFrame.parentStory;
+        const actualFooter = nonEmptyParagraphs(footerStory)
+            .map((i) => paragraphText(footerStory.paragraphs.item(i))).join(" ");
+        parts.push(`footer=${JSON.stringify(actualFooter)}`);
+        if (actualFooter !== String(rec.danis_addon || "").trim()) errors.push(`footer is ${JSON.stringify(actualFooter)}`);
+        if (oversets(footerFrame)) {
+            warnings.push(`${FRAME_NAMES.footer} text doesn't fit its frame — part of the footer is hidden in the JPG`);
+        }
+    }
+    return { report: parts.join(" | "), errors, warnings };
+}
+
+// PHASE A for one product + template, on an already opened working copy:
+// remove the footer page if not applicable, fill EVERY page (image, headline,
+// subline, footer), detach Data Merge, validate every page.
+// Returns { plan, reports: string[], errors: string[] } — the caller only
+// saves and exports when errors is empty.
+function populateDocument(doc, t, rec) {
+    const errors = [];
+    const reports = [];
+    const subline = t.subType === "danis" ? rec.danis_subline : rec.service_subline;
+
+    // Image frames per page before unbinding, so a lost frame is reported
+    // instead of surfacing later as "no image".
+    const framesBefore = [];
+    for (let p = 0; p < doc.pages.length; p++) framesBefore.push(!!findImageFrame(doc.pages.item(p)));
+    unbindImagePlaceholders(doc);
+    for (let p = 0; p < doc.pages.length; p++) {
+        if (framesBefore[p] && !findImageFrame(doc.pages.item(p))) {
+            errors.push(`page ${p + 1}: ${FRAME_NAMES.image} frame disappeared when its Data Merge placeholder was unbound`);
+        }
+    }
+    if (errors.length) return { plan: null, reports, errors };
+
+    // Optional DANIS footer layout: not applicable -> page removed, so the
+    // INDD holds exactly the exported layouts.
+    if (t.subType === "danis" && !hasAddOn(rec)) {
+        for (let p = doc.pages.length - 1; p >= 0; p--) {
+            const page = doc.pages.item(p);
+            if (pageLayout(page, t.subType).position === "footer") {
+                page.remove();
+                reports.push(`danis_footer page removed (DANIS ADD ON empty)`);
+            }
+        }
+    }
+
+    const plan = planPages(doc, t.subType);
+    if (plan.problems.length) return { plan, reports, errors: plan.problems };
+
+    // Fill every page. Each page resolves its OWN frames — nothing is cached
+    // or reused across pages.
+    for (const pg of plan.pages) {
+        const page = doc.pages.item(pg.index);
+        const where = `${pg.layout.key} ${pg.layout.size} (page ${pg.index + 1})`;
+        try {
+            const textDiag = setHeadlineText(doc, findHeadlineFrame(page), rec.headline, subline);
+            const footerFrame = findFooterFrame(page);
+            const footerDiag = footerFrame ? setFooterText(doc, footerFrame, rec.danis_addon || "") : "";
+            const imageFrame = findImageFrame(page);
+            if (!imageFrame) throw new Error(`no ${FRAME_NAMES.image} frame`);
+            const fitNote = placeImageFill(imageFrame, rec.imagePath);
+            pg.fitNote = fitNote;
+            if (TEXT_DIAGNOSTICS) {
+                reports.push(`${where} text: ${textDiag}${footerDiag ? " ### footer: " + footerDiag : ""}`);
+            }
+        } catch (e) {
+            errors.push(`${where}: ${e}`);
+        }
+    }
+    if (errors.length) return { plan, reports, errors };
+
+    detachDataMerge(doc);
+
+    // Validate every page of the finished document (fresh references again).
+    for (const pg of plan.pages) {
+        const v = validatePage(doc.pages.item(pg.index), pg.layout, rec, subline);
+        reports.push(`page ${pg.index + 1} ${v.errors.length ? "INVALID" : "ok"}: ${v.report}`);
+        for (const w of v.warnings) reports.push(`WARNING ${pg.layout.key} ${pg.layout.size} (page ${pg.index + 1}): ${w}`);
+        for (const e of v.errors) errors.push(`${pg.layout.key} ${pg.layout.size} (page ${pg.index + 1}): ${e}`);
+    }
+    // Bindings this DOM can't remove are reported, not fatal: every page was
+    // just validated to show the real image and text.
+    const left = countPlaceholders(doc);
+    if (left.text || left.image) {
+        reports.push(`note: ${left.text} text / ${left.image} image Data Merge binding(s) could not be ` +
+            "removed by this InDesign DOM — page content validated above");
+    }
+
+    return { plan, reports, errors };
+}
+
 // ---------- main render loop ----------
 
-// Opens each template once up front: checks it was prepared by datamerge.js
-// and can be told apart as DANIS / Service, and counts its pages for the
-// progress bar. Throws with every problem found, before anything is rendered.
+// Creates root/seg1/seg2/… one level at a time; returns the last folder's path.
+async function ensureFolders(root, segments) {
+    let path = root.replace(/\/+$/, "");
+    await ensureFolder(path);
+    for (const seg of segments) {
+        path += "/" + seg;
+        await ensureFolder(path);
+    }
+    return path;
+}
+
+// Adds -2, -3… before the extension while `used` already holds the name.
+function uniqueName(name, used) {
+    let candidate = name;
+    for (let n = 2; used.has(candidate.toLowerCase()); n++) {
+        candidate = name.replace(/(\.[^.]+)$/, `-${n}$1`);
+    }
+    used.add(candidate.toLowerCase());
+    return candidate;
+}
+
+// Opens each template once up front: checks it was prepared by datamerge.js,
+// can be told apart as DANIS / Service (one template per type), and that its
+// pages satisfy the output rules. Throws with every problem found, before
+// anything is rendered.
 async function inspectTemplates(templatePaths) {
     const templates = [];
     const problems = [];
     for (const path of templatePaths) {
-        const name = path.split("/").pop();
+        const name = basename(path);
         if (!(await pathExists(path))) { problems.push(`${name}: file not found`); continue; }
-        const subType = subTypeFromPath(path);
-        if (!subType) {
-            problems.push(`${name}: file name must contain "Service" or "DANIS"/"Denis"`);
+        let subType;
+        try {
+            subType = subTypeFromPath(path);
+        } catch (e) {
+            problems.push(`${name}: ${e.message}`);
+            continue;
+        }
+        if (templates.some((t) => t.subType === subType)) {
+            problems.push(`${name}: more than one ${TYPE_FOLDER[subType]} template selected (one INDD per product and type)`);
             continue;
         }
         let doc = null;
         try {
             doc = await openTemplateCopy(path);
-            const pageCount = doc.pages.length;
-            for (let p = 0; p < pageCount; p++) {
+            usePoints(doc);
+            let framesOk = true;
+            for (let p = 0; p < doc.pages.length; p++) {
                 const page = doc.pages.item(p);
                 const missing = [];
                 if (!findHeadlineFrame(page)) missing.push(FRAME_NAMES.text);
                 if (!findImageFrame(page)) missing.push(FRAME_NAMES.image);
-                if (missing.length) problems.push(`${name} page ${p + 1}: no ${missing.join(" / ")} frame`);
+                if (missing.length) {
+                    framesOk = false;
+                    problems.push(`${name} page ${p + 1}: no ${missing.join(" / ")} frame`);
+                }
             }
-            templates.push({ path, name, subType, pageCount });
+            if (framesOk) {
+                const plan = planPages(doc, subType);
+                for (const pr of plan.problems) problems.push(`${name}: ${pr}`);
+                templates.push({
+                    path, name, subType,
+                    mapping: plan.mapping,
+                    exportCount: plan.pages.filter((pg) => pg.layout.position !== "footer").length,
+                    hasFooterPage: plan.pages.some((pg) => pg.layout.position === "footer"),
+                });
+            }
         } catch (e) {
             problems.push(`${name}: could not open (${e})`);
         } finally {
@@ -465,16 +963,34 @@ async function inspectTemplates(templatePaths) {
     return templates;
 }
 
+// JPGs one product + template produces: the always-exported pages, plus the
+// DANIS footer page only when DANIS ADD ON has content.
+function exportCountFor(t, rec) {
+    return t.exportCount + (t.hasFooterPage && hasAddOn(rec) ? 1 : 0);
+}
+
 // manifestRows: array from matcher.js's buildManifest() (only "matched" rows are rendered)
 // templatePaths: absolute paths to the prepared <name>_DataMerge.indd files
-// outputRootPath: absolute path to the chosen output folder
+// outputRootPath: the selected root folder; creates output/… and InDesign/… in it
 // onProgress: optional callback(current, total, message) for UI progress updates
 // Returns: { successCount, errorCount, logLines: string[], failures: [{headline, label, message}] }
 //
-// Per product and template: a fresh copy of the template is opened, every
-// page is filled and exported to JPG, the copy is saved as an editable
-// <product>_<DANIS|Service>.indd into the product's output folder, then
-// closed. The template files themselves are never saved.
+// Per product and template, in two phases on ONE working copy:
+//   A. open a fresh copy of the template, populate every page (image,
+//      headline, subline, footer), detach Data Merge, validate every page,
+//      then save that same document as InDesign/<type>/<…>.indd — only if
+//      validation passed;
+//   B. export the JPGs from the pages of that saved document into
+//      output/<type>/<WxH>/.
+// So the INDD and the JPGs always hold exactly the same content. If phase A
+// fails, nothing is saved or exported for that product + template.
+//
+// Why images went missing before: the working copy still had its native
+// @MainImage Data Merge placeholders bound to the image frames, and pages
+// were filled and exported one at a time with no check of the final
+// document — an image placed into a still-bound placeholder frame could be
+// lost again before the INDD was saved. The placeholders are now unbound
+// first, and every page is checked for a placed image before saving.
 async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress) {
     const logLines = ["timestamp,headline,page_label,output_file,status,message"];
     const failures = [];
@@ -483,115 +999,100 @@ async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress
     }
 
     const templates = await inspectTemplates(templatePaths);
-    await ensureFolder(outputRootPath);
+    const root = outputRootPath.replace(/\/+$/, "");
+    const inddFolder = {};
+    for (const t of templates) inddFolder[t.subType] = await ensureFolders(root, ["InDesign", TYPE_FOLDER[t.subType]]);
 
     const matchedRows = manifestRows.filter((r) => r.status === "matched");
-    // One op per page JPG plus one per template INDD save, per product.
-    const opsPerProduct = templates.reduce((n, t) => n + t.pageCount + 1, 0);
-    const totalOps = matchedRows.length * opsPerProduct;
+    // Per product + template: one op per exported JPG plus one for the INDD.
+    let totalOps = 0;
+    for (const rec of matchedRows) for (const t of templates) totalOps += exportCountFor(t, rec) + 1;
     let done = 0;
     let successCount = 0;
     let errorCount = 0;
 
+    const csv = (v) => String(v == null ? "" : v).replace(/,/g, ";");
+    const logLine = (headline, label, outPath, status, message) => {
+        logLines.push([new Date().toISOString(), csv(headline), csv(label), csv(outPath), status, csv(message)].join(","));
+    };
     const logSuccess = (headline, label, outPath, note) => {
-        logLines.push([new Date().toISOString(), headline, label, outPath, "success", note || ""].join(","));
+        logLine(headline, label, outPath, "success", note || "");
         successCount++;
     };
     const logError = (headline, label, outPath, e) => {
-        logLines.push([new Date().toISOString(), headline, label, outPath, "error", String(e).replace(/,/g, ";")].join(","));
+        logLine(headline, label, outPath, "error", String(e));
         errorCount++;
         failures.push({ headline, label, message: String(e) });
     };
-    const tick = (message) => {
-        done++;
+    const tick = (message, n) => {
+        done += n || 1;
         if (onProgress) onProgress(done, totalOps, message);
     };
-    // Marks every remaining op of one template (its pages + the INDD) as failed.
-    const skipTemplate = (headline, t, e) => {
-        for (let p = 0; p < t.pageCount; p++) {
-            logError(headline, `${t.name} p${p + 1}`, "", e);
-            tick(`${headline} — ${t.name} p${p + 1} (skipped)`);
-        }
-        logError(headline, `${t.name} indd`, "", e);
-        tick(`${headline} — ${t.name} indd (skipped)`);
-    };
+
+    for (const t of templates) logLine("", `${t.name} layouts`, "", "info", t.mapping);
+
+    const usedJpg = new Set();
+    const usedIndd = new Set();
 
     for (const rec of matchedRows) {
         const headline = rec.headline;
-        const sanitized = sanitizeHeadline(headline);
 
-        let outDir;
-        try {
-            outDir = await ensureFolder(outputRootPath + "/" + sanitized);
-        } catch (e) {
-            // Can't create this product's output folder — skip it rather
-            // than aborting the rest of the batch.
-            for (const t of templates) skipTemplate(headline, t, e);
-            continue;
-        }
-
-        const usedNames = new Set();
         for (const t of templates) {
-            const subline = t.subType === "denis" ? rec.danis_subline : rec.service_subline;
-            const inddPath = outDir.nativePath + "/" + sanitized + "_" +
-                (t.subType === "denis" ? "DANIS" : "Service") + ".indd";
+            const ops = exportCountFor(t, rec) + 1;
+            const inddName = uniqueName(buildInddFileName(rec, t.subType), usedIndd);
+            const inddPath = inddFolder[t.subType] + "/" + inddName;
             if (templatePaths.some((tp) => samePath(tp, inddPath))) {
-                skipTemplate(headline, t, new Error("Refusing to overwrite template: " + inddPath));
+                logError(headline, `${t.name} indd`, inddPath, new Error("Refusing to overwrite template: " + inddPath));
+                tick(`${headline} — ${t.name} (skipped)`, ops);
                 continue;
             }
 
             let doc = null;
+            let opsDone = 0;
             try {
                 try {
                     doc = await openTemplateCopy(t.path);
                 } catch (e) {
-                    skipTemplate(headline, t, new Error("Could not open template: " + e));
-                    continue;
+                    throw new Error("Could not open template: " + e);
                 }
                 usePoints(doc);
                 unlockAll(doc);
 
-                for (let p = 0; p < doc.pages.length; p++) {
-                    const label = `${t.name} p${p + 1}`;
+                // ---- PHASE A: populate, validate, save ----
+                const result = populateDocument(doc, t, rec);
+                for (const r of result.reports) logLine(headline, `${t.name} check`, "", "info", r);
+                if (result.errors.length) {
+                    throw new Error("not saved — " + result.errors.join(" / "));
+                }
+                await saveWhenIdle(doc, inddPath);
+                logSuccess(headline, `${t.name} indd`, inddPath, "populated + validated");
+                opsDone++;
+                tick(`${headline} — ${inddName}`);
+
+                // ---- PHASE B: export from the saved, populated document ----
+                for (const pg of result.plan.pages) {
+                    if (!pg.export) continue;
+                    const label = `${t.name} ${pg.layout.key} ${pg.layout.size}`;
                     let outPath = "";
                     try {
-                        const page = doc.pages.item(p);
-                        const layout = pageLayout(page, t.subType);
-
-                        // Two pages with the same size + position get -2, -3…
-                        let outFileName = buildOutputFileName(rec, layout);
-                        for (let n = 2; usedNames.has(outFileName); n++) {
-                            outFileName = buildOutputFileName(rec, { ...layout, position: `${layout.position}-${n}` });
-                        }
-                        usedNames.add(outFileName);
-                        outPath = outDir.nativePath + "/" + outFileName;
-
-                        setHeadlineText(findHeadlineFrame(page), headline, subline);
-                        const footer = findFooterFrame(page);
-                        if (footer) setFooterText(footer, rec.danis_addon || "");
-                        const fitNote = placeImageFill(findImageFrame(page), rec.imagePath);
-
-                        exportPageAsJPEG(doc, page, outPath);
-                        logSuccess(headline, label, outPath, fitNote);
+                        const dir = await ensureFolders(root, ["output", TYPE_FOLDER[t.subType], pg.layout.size]);
+                        outPath = dir + "/" + uniqueName(buildOutputFileName(rec, pg.layout), usedJpg);
+                        exportPageAsJPEG(doc, doc.pages.item(pg.index), outPath);
+                        logSuccess(headline, label, outPath, pg.fitNote);
                     } catch (e) {
                         logError(headline, label, outPath, e);
                     }
+                    opsDone++;
                     tick(`${headline} — ${label}`);
                 }
-
-                // Save-as to the product folder: writes a new file and leaves
-                // the template untouched.
-                try {
-                    await saveWhenIdle(doc, inddPath);
-                    logSuccess(headline, `${t.name} indd`, inddPath);
-                } catch (e) {
-                    logError(headline, `${t.name} indd`, inddPath, e);
-                }
-                tick(`${headline} — ${t.name} indd`);
+            } catch (e) {
+                // Phase A failed (or the open/save did): nothing saved/exported.
+                logError(headline, `${t.name} indd`, inddPath, e);
             } finally {
                 closeWithoutSaving(doc);
                 await settle(250);
             }
+            if (opsDone < ops) tick(`${headline} — ${t.name}`, ops - opsDone);
         }
     }
 
