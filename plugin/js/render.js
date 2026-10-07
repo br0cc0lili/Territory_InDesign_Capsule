@@ -209,10 +209,23 @@ function setSplitText(headlineFrame, sublineFrame, headline, subline) {
     sublineFrame.contents = subline;
 }
 
+// Places the image and frames it with InDesign's Content-Aware Fit (Adobe
+// Sensei picks the main subject and scales/positions around it). Falls back
+// to the old fill + center when Content-Aware Fit isn't available in this
+// InDesign version or fails on a particular image.
+// Returns a short note for the generation log.
 function placeImageFill(frame, imagePath) {
+    const { FitOptions } = indesign();
     frame.place(imagePath);
-    frame.fit(indesign().FitOptions.FILL_PROPORTIONALLY);
-    frame.fit(indesign().FitOptions.CENTER_CONTENT);
+    try {
+        if (FitOptions.CONTENT_AWARE_FIT === undefined) throw new Error("not supported");
+        frame.fit(FitOptions.CONTENT_AWARE_FIT);
+        return "fit=content-aware";
+    } catch (e) {
+        frame.fit(FitOptions.FILL_PROPORTIONALLY);
+        frame.fit(FitOptions.CENTER_CONTENT);
+        return "fit=fill-center (content-aware failed: " + String(e).replace(/,/g, ";") + ")";
+    }
 }
 
 function exportPageAsJPEG(doc, page, outputPath) {
@@ -347,11 +360,11 @@ async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress
 
                     const imageFrame = findImageFrame(targetPage);
                     if (!imageFrame) throw new Error("<<MainImage>> frame not found on page " + label);
-                    placeImageFill(imageFrame, imagePath);
+                    const fitNote = placeImageFill(imageFrame, imagePath);
 
                     exportPageAsJPEG(targetDoc, targetPage, outPath);
 
-                    logLines.push([new Date().toISOString(), headline, label, outPath, "success", ""].join(","));
+                    logLines.push([new Date().toISOString(), headline, label, outPath, "success", fitNote].join(","));
                     successCount++;
                 } catch (e) {
                     logLines.push([new Date().toISOString(), headline, label, outPath, "error", String(e).replace(/,/g, ";")].join(","));
