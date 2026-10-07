@@ -18,6 +18,16 @@ const IMAGE_PREFERENCE = [/\(web_1080p\)\.jpe?g$/i];
 const EXCLUDE_PATTERNS = [/Bildschirmfoto/i, /^\./];
 const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".tif", ".tiff"]);
 
+// Accepted header texts (upper-cased) per field.
+const COLUMN_HEADERS = {
+    headline: ["DANIS + SERVICE HEADLINE +PRODUCT NAMING", "DANIS + SERVICE HEADLINE", "HEADLINE"],
+    picture: ["PICTURE NAME"],
+    danisSubline: ["DANIS SUBLINE", "DANIS_SUBLINE"],
+    danisAddOn: ["DANIS ADD ON"],
+    serviceSubline: ["SERVICE SUBLINE", "SERVICE_SUBLINE"],
+    year: ["YEAR"],
+};
+
 const MATCH_THRESHOLD = 0.6;
 const CONTAINMENT_SCORE = 0.95;
 
@@ -102,7 +112,9 @@ function sequenceMatcherRatio(a, b) {
 //   .xlsx / .xls -> uses the existing AOZ+AOT worksheet
 //   .csv         -> uses the first worksheet produced by SheetJS
 //
-// Expected first three columns stay compatible with the existing workbook:
+// Columns are looked up by header text (see COLUMN_HEADERS), so the sheet
+// layout can change without breaking the reader. If the header row isn't
+// recognised, falls back to the old positional layout:
 //   headline | danis_subline | service_subline
 async function readDataRows(dataEntry) {
     const lowerName = String(dataEntry.name || "").toLowerCase();
@@ -127,14 +139,37 @@ async function readDataRows(dataEntry) {
     }
 
     const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    if (!raw.length) return [];
+
+    const header = raw[0].map((h) => String(h).trim().toUpperCase());
+    const COLS = {};
+    for (const key in COLUMN_HEADERS) {
+        COLS[key] = header.findIndex((h) => COLUMN_HEADERS[key].includes(h));
+    }
+    if (COLS.danisSubline === -1 && COLS.serviceSubline === -1) {
+        // Header not recognised — old positional layout.
+        Object.assign(COLS, { headline: 0, danisSubline: 1, serviceSubline: 2 });
+    }
+    if (COLS.headline === -1) COLS.headline = 0;
+
+    // "n/a" in the sheet means "no text for this field".
+    const cell = (row, idx) => {
+        if (idx === -1) return "";
+        const v = String(row[idx] == null ? "" : row[idx]).trim();
+        return v.toLowerCase() === "n/a" ? "" : v;
+    };
+
     const rows = [];
     for (let r = 1; r < raw.length; r++) { // skip header row
-        const [headline, danisSubline, serviceSubline] = raw[r];
+        const headline = cell(raw[r], COLS.headline);
         if (!headline) continue;
         rows.push({
-            headline: String(headline).trim(),
-            danis_subline: String(danisSubline || "").trim(),
-            service_subline: String(serviceSubline || "").trim(),
+            headline,
+            picture_name: cell(raw[r], COLS.picture),
+            danis_subline: cell(raw[r], COLS.danisSubline),
+            danis_addon: cell(raw[r], COLS.danisAddOn),
+            service_subline: cell(raw[r], COLS.serviceSubline),
+            year: cell(raw[r], COLS.year) || String(new Date().getFullYear()),
         });
     }
     return rows;
@@ -223,11 +258,33 @@ function matchHeadlineToFolder(headline, folders) {
 async function buildManifest(dataEntry, picturesFolderEntry) {
     const excelRows = await readDataRows(dataEntry);
     const folders = await listProductFolders(picturesFolderEntry);
+    const allFiles = (await walkFiles(picturesFolderEntry))
+        .filter((f) => !EXCLUDE_PATTERNS.some((p) => p.test(f.name)));
 
     const matchedFolderPaths = new Set();
     const manifestRows = [];
 
     for (const row of excelRows) {
+        // The sheet names the exact picture file (without extension), so use
+        // that directly when present instead of fuzzy folder matching.
+        if (row.picture_name) {
+            const wanted = row.picture_name.toLowerCase();
+            const image = allFiles.find((f) => {
+                const base = f.name.replace(/\.[^.]+$/, "").toLowerCase();
+                return base === wanted;
+            });
+            if (image) {
+                manifestRows.push({
+                    ...row,
+                    imagePath: image.nativePath,
+                    imageEntry: image,
+                    status: "matched",
+                    notes: `picture='${image.name}' score=1.00`,
+                });
+                continue;
+            }
+        }
+
         const match = matchHeadlineToFolder(row.headline, folders);
         if (!match) {
             manifestRows.push({

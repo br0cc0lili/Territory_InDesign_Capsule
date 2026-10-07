@@ -67,8 +67,8 @@ function updateGenerateButtonState() {
 
 async function resolveMasterPath() {
     const pluginFolder = await fs.getPluginFolder();
-    const root = pluginFolder.nativePath.replace(/\/03_Plugin\/?$/, "");
-    return root + "/02_System/templates/Poster_Master.indd";
+    const root = pluginFolder.nativePath.replace(/\/plugin\/?$/, "");
+    return root + "/system/templates/Poster_Master.indd";
 }
 
 function showFontBanner(message) {

@@ -74,18 +74,28 @@ const AUDI_FONT_NAME = "Audi Type\tExtended Bold";
 //
 // All normal layouts keep headline + subline in the same <<Headline>> frame.
 // The Denis split layout uses two frames: <<Headline>> and <<Subline>>.
+//
+// `position` is the last part of the output file name (up / bottom / footer).
+// The two Service 1200x1200 top variants get up-a / up-b so they never
+// overwrite each other.
 const PAGE_CONFIG = {
-    "service_1200x1200_top_a": { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
-    "service_1200x1200_top_b": { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
-    "service_1080x1920_top":   { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
-    "service_1080x1920_bottom":{ textPos: "textbottom", subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
-    "service_800x600_top":     { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 800,  h: 600  },
-    "service_800x600_bottom":  { textPos: "textbottom", subType: "service", textLayout: "stacked", w: 800,  h: 600  },
-    "service_250x250_top":     { textPos: "texttop",    subType: "service", textLayout: "stacked", w: 250,  h: 250  },
+    "service_1200x1200_top_a": { textPos: "texttop",    position: "up-a",   subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
+    "service_1200x1200_top_b": { textPos: "texttop",    position: "up-b",   subType: "service", textLayout: "stacked", w: 1200, h: 1200 },
+    "service_1080x1920_top":   { textPos: "texttop",    position: "up",     subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
+    "service_1080x1920_bottom":{ textPos: "textbottom", position: "bottom", subType: "service", textLayout: "stacked", w: 1080, h: 1920 },
+    "service_800x600_top":     { textPos: "texttop",    position: "up",     subType: "service", textLayout: "stacked", w: 800,  h: 600  },
+    "service_800x600_bottom":  { textPos: "textbottom", position: "bottom", subType: "service", textLayout: "stacked", w: 800,  h: 600  },
+    "service_250x250_top":     { textPos: "texttop",    position: "up",     subType: "service", textLayout: "stacked", w: 250,  h: 250  },
 
-    "denis_1200x1200_top":     { textPos: "texttop",    subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
-    "denis_1200x1200_bottom":  { textPos: "textbottom", subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
-    "denis_1200x1200_split":   { textPos: "split",      subType: "denis",   textLayout: "split",   w: 1200, h: 1200 },
+    "denis_1200x1200_top":     { textPos: "texttop",    position: "up",     subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
+    "denis_1200x1200_bottom":  { textPos: "textbottom", position: "bottom", subType: "denis",   textLayout: "stacked", w: 1200, h: 1200 },
+    "denis_1200x1200_split":   { textPos: "split",      position: "footer", subType: "denis",   textLayout: "split",   w: 1200, h: 1200 },
+};
+
+// File name prefix per subline type.
+const PROJECT_PREFIX = {
+    denis: "DANIS_Herbst",
+    service: "Service_Herbst",
 };
 
 // Temporary diagnostic: dumps the top-level keys of require("indesign") so we
@@ -152,6 +162,26 @@ function sanitizeHeadline(headline) {
     let s = headline.replace(/\s+/g, "_");
     s = s.replace(/[\/\\:\*\?"<>\|]/g, "");
     return s;
+}
+
+// Headline as used inside output file names: spaces removed (so "_" stays a
+// clean field separator), trailing footnote digits dropped
+// ("Ski- und Snowboardhalter1" -> "Ski-undSnowboardhalter").
+function fileNameHeadline(headline) {
+    let s = headline.replace(/\d+$/, "").replace(/\s+/g, "");
+    s = s.replace(/[\/\\:\*\?"<>\|_]/g, "");
+    return s;
+}
+
+// <DANIS_Herbst|Service_Herbst>_<year>_<headline>_<WxH>_<up|bottom|footer>.jpg
+function buildOutputFileName(rec, cfg) {
+    return [
+        PROJECT_PREFIX[cfg.subType],
+        rec.year,
+        fileNameHeadline(rec.headline),
+        `${cfg.w}x${cfg.h}`,
+        cfg.position,
+    ].join("_") + ".jpg";
 }
 
 // NOTE: InDesign's Collection-like objects are NOT consistent in this UXP DOM
@@ -328,9 +358,7 @@ async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress
                 const cfg = PAGE_CONFIG[label];
                 const subline = cfg.subType === "denis" ? rec.danis_subline : rec.service_subline;
 
-                // Include the page label so the two 1200x1200 Service top variants
-                // never overwrite each other.
-                const outFileName = `${sanitized}_${label}_${cfg.w}x${cfg.h}.jpg`;
+                const outFileName = buildOutputFileName(rec, cfg);
                 const outPath = outDir.nativePath + "/" + outFileName;
 
                 try {
