@@ -549,6 +549,23 @@ async function resolveSourcePath(doc) {
     return { path: "", diagnostics };
 }
 
+// doc.save() straight after a batch of edits can fail with "Cannot save
+// document because there are open transactions in process on the database":
+// InDesign is still committing those edits. Yield and retry until it's done.
+async function saveWhenIdle(doc, path) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, attempt ? 250 : 0));
+        try {
+            return path ? doc.save(path) : doc.save();
+        } catch (e) {
+            lastErr = e;
+            if (!/transaction/i.test(String(e))) throw e;
+        }
+    }
+    throw lastErr;
+}
+
 async function pathExists(path) {
     try {
         await require("uxp").storage.localFileSystem.getEntryWithUrl("file:" + path);
@@ -570,9 +587,10 @@ async function copyPathFor(srcPath) {
 // Returns prepareDocument()'s result plus { sourcePath, copyPath, saved, diagnostics }.
 async function prepareActiveDocument(csvPath) {
     const { app } = indesign();
+    if (!app) throw new Error("InDesign isn't ready yet (app unavailable) — wait a moment and click again.");
 
     let src;
-    try { src = app.activeDocument; } catch (e) { src = null; }
+    try { src = app.documents.length ? app.activeDocument : null; } catch (e) { src = null; }
     if (!src) throw new Error("No document is open — open the client .indd first.");
 
     // Check layers on the client file (read-only) before making any copy.
@@ -608,7 +626,7 @@ async function prepareActiveDocument(csvPath) {
     // Persist the prepared copy (in place — it is our file, not the client's).
     let saved = true;
     try {
-        doc.save();
+        await saveWhenIdle(doc);
     } catch (e) {
         saved = false;
         result.warnings.push("could not save the prepared copy (" + e + ") — save it yourself with Cmd+S");
