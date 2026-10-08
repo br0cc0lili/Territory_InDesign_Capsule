@@ -41,6 +41,26 @@ button:disabled {
     font-size: 11px;
 }
 
+/* A picker button with its "No file selected" label, vertically centred
+   on the button. Long paths wrap next to the button instead of below it. */
+.picker {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.picker button {
+    margin-bottom: 0;
+    flex-shrink: 0;
+}
+
+.picker .path-label {
+    flex: 1;
+    min-width: 0;
+    word-break: break-all;
+}
+
 .hint {
     color: #9a9a9a;
     font-size: 11px;
