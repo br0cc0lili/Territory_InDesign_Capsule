@@ -42,7 +42,6 @@ const el = {
     btnMatch: document.getElementById("btn-match"),
     matchSummary: document.getElementById("match-summary"),
     resultsBody: document.querySelector("#results tbody"),
-    btnTemplates: document.getElementById("btn-templates"),
     templateList: document.getElementById("template-list"),
     btnOutput: document.getElementById("btn-output"),
     outputPath: document.getElementById("output-path"),
@@ -85,7 +84,15 @@ function showFontBanner(message) {
 // require("indesign").app can still be undefined right after the panel
 // shows (the bridge is mid-attach). Polls until it's there, so the first real
 // call (font check, Prepare, Generate) doesn't fail on a missing app.
-async function waitForInDesign(timeoutMs = 3000) {
+const NOT_READY = "InDesign isn't responding to the plugin. Close any open InDesign " +
+    "dialog, then close and reopen this panel (Window menu) and try again.";
+
+// "Error: Error: …" otherwise — String(e) already starts with "Error:".
+function errorText(e) {
+    return "Error: " + String((e && e.message) || e).replace(/^Error:\s*/, "");
+}
+
+async function waitForInDesign(timeoutMs = 10000) {
     for (let waited = 0; waited <= timeoutMs; waited += 100) {
         try {
             if (require("indesign").app) return true;
@@ -103,7 +110,7 @@ async function init() {
     if (!render) return; // font check needs render.js; skip if it failed to load
 
     if (!(await waitForInDesign())) {
-        showFontBanner("InDesign isn't ready yet — reload the plugin if buttons report errors.");
+        showFontBanner(NOT_READY);
         return;
     }
     const fontCheck = render.checkAudiFont();
@@ -115,7 +122,7 @@ el.btnDmCsv.addEventListener("click", async () => {
     try {
         entry = await fs.getFileForOpening({ types: ["xlsx", "csv", "txt"] });
     } catch (e) {
-        el.dmCsvPath.textContent = "Error: " + e;
+        el.dmCsvPath.textContent = errorText(e);
         return;
     }
     if (!entry) return;
@@ -134,7 +141,7 @@ el.btnDmPrepare.addEventListener("click", async () => {
     el.dmSummary.textContent = "Saving a working copy and preparing it…";
 
     try {
-        await waitForInDesign();
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
         // Data Merge only reads CSV/TXT: convert an Excel pick first. Step 2's
         // photos folder is used to fill @MainImage only if it happens to be
         // chosen already — preparing the template never requires it.
@@ -158,7 +165,7 @@ el.btnDmPrepare.addEventListener("click", async () => {
         if (!result.saved) pageLines.push("⚠ The template couldn't be saved — press Cmd+S in InDesign.");
         el.dmSummary.textContent = pageLines.join("\n");
     } catch (e) {
-        el.dmSummary.textContent = "Error: " + e;
+        el.dmSummary.textContent = errorText(e);
     } finally {
         el.btnDmPrepare.disabled = false;
     }
@@ -169,7 +176,7 @@ el.btnExcel.addEventListener("click", async () => {
     try {
         entry = await fs.getFileForOpening({ types: ["xlsx"] });
     } catch (e) {
-        el.excelPath.textContent = "Error: " + e;
+        el.excelPath.textContent = errorText(e);
         return;
     }
     if (!entry) return;
@@ -183,7 +190,7 @@ el.btnPhotos.addEventListener("click", async () => {
     try {
         entry = await fs.getFolder();
     } catch (e) {
-        el.photosPath.textContent = "Error: " + e;
+        el.photosPath.textContent = errorText(e);
         return;
     }
     if (!entry) return;
@@ -192,25 +199,12 @@ el.btnPhotos.addEventListener("click", async () => {
     updateMatchButtonState();
 });
 
-el.btnTemplates.addEventListener("click", async () => {
-    let entries;
-    try {
-        entries = await fs.getFileForOpening({ types: ["indd"], allowMultiple: true });
-    } catch (e) {
-        el.generateSummary.textContent = "Error opening file picker: " + e;
-        return;
-    }
-    if (!entries || entries.length === 0) return;
-    templatePaths = [];
-    for (const entry of entries) addTemplatePath(entry.nativePath);
-});
-
 el.btnOutput.addEventListener("click", async () => {
     let entry;
     try {
         entry = await fs.getFolder();
     } catch (e) {
-        el.outputPath.textContent = "Error: " + e;
+        el.outputPath.textContent = errorText(e);
         return;
     }
     if (!entry) return;
@@ -231,7 +225,7 @@ el.btnMatch.addEventListener("click", async () => {
     try {
         manifestRows = await matcher.buildManifest(excelEntry, photosEntry);
     } catch (e) {
-        el.matchSummary.textContent = "Error: " + e;
+        el.matchSummary.textContent = errorText(e);
         el.btnMatch.disabled = false;
         return;
     }
@@ -276,7 +270,7 @@ el.btnGenerate.addEventListener("click", async () => {
     el.progressLabel.textContent = "Starting…";
 
     try {
-        await waitForInDesign();
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
         const result = await render.renderAll(
             manifestRows,
             templatePaths,
@@ -302,7 +296,7 @@ el.btnGenerate.addEventListener("click", async () => {
         }
         el.generateSummary.textContent = summary;
     } catch (e) {
-        el.generateSummary.textContent = "Error: " + e;
+        el.generateSummary.textContent = errorText(e);
     } finally {
         el.btnGenerate.disabled = false;
         updateGenerateButtonState();

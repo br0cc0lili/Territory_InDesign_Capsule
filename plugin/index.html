@@ -10,19 +10,25 @@
 
     <section class="step">
         <h2>1. Prepare client template for Data Merge</h2>
-        <button id="btn-dm-csv">Select Excel / CSV…</button>
-        <span id="dm-csv-path" class="path-label">No file selected</span>
+        <div class="picker">
+            <button id="btn-dm-csv">Select Excel / CSV…</button>
+            <span id="dm-csv-path" class="path-label">No file selected</span>
+        </div>
 
         <button id="btn-dm-prepare" disabled>Prepare Copy of Current Document</button>
         <div id="dm-summary" class="summary"></div>
     </section>
     <section class="step">
         <h2>2. Select inputs</h2>
-        <button id="btn-excel">Select Excel File…</button>
-        <span id="excel-path" class="path-label">No file selected</span>
+        <div class="picker">
+            <button id="btn-excel">Select Excel File…</button>
+            <span id="excel-path" class="path-label">No file selected</span>
+        </div>
 
-        <button id="btn-photos">Select Photos Folder…</button>
-        <span id="photos-path" class="path-label">No folder selected</span>
+        <div class="picker">
+            <button id="btn-photos">Select Photos Folder…</button>
+            <span id="photos-path" class="path-label">No folder selected</span>
+        </div>
     </section>
 
     <section class="step">
@@ -47,14 +53,11 @@
 
     <section class="step">
         <h2>4. Generate</h2>
-        <p class="hint">Templates: the &lt;name&gt;_DataMerge.indd files made
-            in step 1 (added here automatically after Prepare). Pick the DANIS
-            one, the Service one, or both — only the selected types are
-            generated. The file name tells them apart (at most one per type).</p>
-        <button id="btn-templates">Select Prepared Templates…</button>
         <ul id="template-list" class="file-list"></ul>
-        <button id="btn-output">Select Output Folder…</button>
-        <span id="output-path" class="path-label">No folder selected</span>
+        <div class="picker">
+            <button id="btn-output">Select Output Folder…</button>
+            <span id="output-path" class="path-label">No folder selected</span>
+        </div>
 
         <button id="btn-generate" disabled>Generate Posters</button>
         <div id="progress" class="progress-hidden">
