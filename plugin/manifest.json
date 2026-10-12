@@ -24,7 +24,8 @@
     "requiredPermissions": {
         "localFileSystem": "fullAccess",
         "launchProcess": {
-            "schemes": ["file"]
+            "schemes": ["file"],
+            "extensions": [".jpg", ""]
         }
     }
 }
