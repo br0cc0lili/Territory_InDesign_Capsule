@@ -59,34 +59,34 @@ One file per template type: one DANIS and one Service.
 
  File name | Result 
 
-| `DANIS_Template.indd` | Yes DANIS |
-| `Service_Template.indd` | Yes Service |
-| `Denis_Template.indd` | Fault error: the spelling `Denis` is not accepted |
-| `DANIS_Service.indd` | Fault error: contains both |
-| Unsaved `Untitled-1` | Fault error: the document must be saved to disk first |
+ `DANIS_Template.indd` | Yes DANIS 
+ `Service_Template.indd` | Yes Service 
+ `Denis_Template.indd` | Fault error: the spelling `Denis` is not accepted 
+ `DANIS_Service.indd` | Fault error: contains both 
+ Unsaved `Untitled-1` | Fault error: the document must be saved to disk first 
 
 **Layers** (names are case-insensitive), on every page:
 
-| Layer | Requirement | Used for |
+ Layer | Requirement | Used for 
 
-| `text` | **Required**, exactly 1 text frame per page | 1st non-empty paragraph = headline; 2nd non-empty paragraph = subline |
-| `Image` | **Required**, exactly 1 graphic frame per page (rectangle / polygon / oval) | Main product image |
-| `footer` | Optional, 0 or 1 text frame per page | DANIS ADD ON copy |
-| Anything else (e.g. `shadow`) | Left untouched | — |
+ `text` | **Required**, exactly 1 text frame per page | 1st non-empty paragraph = headline; 2nd non-empty paragraph = subline 
+ `Image` | **Required**, exactly 1 graphic frame per page (rectangle / polygon / oval) | Main product image 
+ `footer` | Optional, 0 or 1 text frame per page | DANIS ADD ON copy 
+ Anything else (e.g. `shadow`) | Left untouched 
 
 > You can also name frames `<<Headline>>`, `<<Footer>>` and `<<MainImage>>` directly. A named frame takes priority over the layer lookup.
 > The plugin **never** guesses a frame by size or position. If a layer holds the wrong number of frames, it reports an error.
 
 **Page sizes (in pt; exported 1 pt = 1 px).** Each template must contain exactly these pages:
 
-| Template | Size | Layouts | Notes |
+ Template | Size | Layouts | Notes 
 
-| DANIS | 1200×1200 | `up`, `bottom` | Required |
-| DANIS | 1200×1200 | `footer` | Optional; exported only for products whose DANIS ADD ON has content |
-| Service | 250×250 | `thumbnail` | Required |
-| Service | 800×600 | `up`, `bottom` | Required |
-| Service | 1080×1920 | `up`, `bottom` | Required |
-| Service | 1200×1200 | `up`, `bottom` | Required |
+ DANIS | 1200×1200 | `up`, `bottom` | Required 
+ DANIS | 1200×1200 | `footer` | Optional; exported only for products whose DANIS ADD ON has content 
+ Service | 250×250 | `thumbnail` | Required 
+ Service | 800×600 | `up`, `bottom` | Required 
+ Service | 1080×1920 | `up`, `bottom` | Required 
+ Service | 1200×1200 | `up`, `bottom` | Required 
 
 - `up` / `bottom` is detected from where the headline frame sits: upper half of the page = `up`, lower half = `bottom`.
 - A DANIS page with a footer frame counts as the `footer` layout.
@@ -97,14 +97,14 @@ One file per template type: one DANIS and one Service.
 - Must contain a sheet named **`AOZ+AOT`**, with headers in row 1.
 - Columns are found **by header name**, so column order does not matter:
 
-| Header | Required | Description |
+ Header | Required | Description 
 
-| `DANIS + SERVICE HEADLINE +PRODUCT NAMING` | Yes | Headline; rows with an empty headline are skipped |
-| `DANIS SUBLINE` | Yes | Second paragraph in DANIS templates |
-| `SERVICE SUBLINE` | Yes | Second paragraph in Service templates |
-| `PICTURE NAME` | Required for step 1 | Image file name (without extension), used for exact image matching |
-| `DANIS ADD ON` | Optional | DANIS footer copy; if empty, no footer version is produced |
-| `YEAR` | Optional | Used in output file names; defaults to the current year |
+ `DANIS + SERVICE HEADLINE +PRODUCT NAMING` | Yes | Headline; rows with an empty headline are skipped 
+ `DANIS SUBLINE` | Yes | Second paragraph in DANIS templates 
+ `SERVICE SUBLINE` | Yes | Second paragraph in Service templates 
+ `PICTURE NAME` | Required for step 1 | Image file name (without extension), used for exact image matching 
+ `DANIS ADD ON` | Optional | DANIS footer copy; if empty, no footer version is produced 
+ `YEAR` | Optional | Used in output file names; defaults to the current year 
 
 - A cell containing `n/a` is treated as empty.
 
@@ -218,19 +218,19 @@ When it finishes, the panel shows the success and error counts and lists any fai
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+ Symptom | Cause / fix 
 
-| Red "Plugin module load error" banner | A JS file failed to load; the banner names it. All other buttons still work. |
-| Amber "Audi Type font not installed" | Install the Audi Type font, then reopen the panel. |
-| "InDesign isn't responding to the plugin" | Close any open InDesign dialog, then close and reopen the panel from the Window menu. |
-| "Could not determine template type from filename" | The template file name must contain `DANIS` or `SERVICE` (`Denis` does not work). |
-| "Layer(s) not found" | The template is missing the `text` or `Image` layer. |
-| "… has no file on disk" | The active document has never been saved. Press Cmd+S first. |
-| "Data source is missing column(s)" | An Excel header name is wrong, or the `PICTURE NAME` column is missing. |
-| "Sheet "AOZ+AOT" not found" | The sheet must be named exactly `AOZ+AOT`. |
-| "more than one DANIS template selected" | Step 1 was run twice for the same template type in one session. Reload the panel and prepare each type once. |
-| Generate button is greyed out | Needs at least 1 matched row, an output folder, and a non-empty template list. |
-| Template list is empty after reloading the panel | The list only lives in the current panel session. Run step 1 again (it creates a new `_DataMerge_2` copy). |
+ Red "Plugin module load error" banner | A JS file failed to load; the banner names it. All other buttons still work. 
+ Amber "Audi Type font not installed" | Install the Audi Type font, then reopen the panel. 
+ "InDesign isn't responding to the plugin" | Close any open InDesign dialog, then close and reopen the panel from the Window menu. 
+ "Could not determine template type from filename" | The template file name must contain `DANIS` or `SERVICE` (`Denis` does not work). 
+ "Layer(s) not found" | The template is missing the `text` or `Image` layer. 
+ "… has no file on disk" | The active document has never been saved. Press Cmd+S first. 
+ "Data source is missing column(s)" | An Excel header name is wrong, or the `PICTURE NAME` column is missing. 
+ "Sheet "AOZ+AOT" not found" | The sheet must be named exactly `AOZ+AOT`. 
+ "more than one DANIS template selected" | Step 1 was run twice for the same template type in one session. Reload the panel and prepare each type once. 
+ Generate button is greyed out | Needs at least 1 matched row, an output folder, and a non-empty template list. 
+ Template list is empty after reloading the panel | The list only lives in the current panel session. Run step 1 again (it creates a new `_DataMerge_2` copy). 
 
 ---
 
