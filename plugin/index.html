@@ -5,6 +5,11 @@
     <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
+    <div id="main">
+    <div class="topbar">
+        <button id="btn-reload" class="btn-small" title="Reset the panel to a clean start (files on disk are not touched)">⟳ Reload</button>
+    </div>
+
     <div id="load-error-banner" class="banner banner-error banner-hidden"></div>
     <div id="font-banner" class="banner banner-hidden"></div>
 
@@ -31,41 +36,70 @@
         </div>
     </section>
 
-    <section class="step">
-        <h2>3. Match</h2>
-        <button id="btn-match" disabled>Match</button>
+    <section class="step step-last">
+        <h2>3. Match, Generate &amp; Review</h2>
+        <div class="actions">
+            <button id="btn-match" disabled>Match</button>
+            <button id="btn-output">Select Output Folder…</button>
+            <button id="btn-generate" disabled>Generate All</button>
+        </div>
+        <div class="path-line"><span class="path-caption">Template Set:</span> <span id="template-list" class="path-label">None yet — prepare one in step 1</span></div>
+        <div class="path-line"><span class="path-caption">Output:</span> <span id="output-path" class="path-label">No folder selected</span></div>
         <div id="match-summary" class="summary"></div>
         <div class="table-wrap">
             <table id="results">
                 <thead>
                     <tr>
-                        <th>Headline</th>
-                        <th>Matched folder</th>
-                        <th>Image</th>
-                        <th>Score</th>
+                        <th>Product</th>
+                        <th>Match</th>
+                        <th>INDD</th>
                         <th>Status</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
             </table>
         </div>
-    </section>
-
-    <section class="step">
-        <h2>4. Generate</h2>
-        <ul id="template-list" class="file-list"></ul>
-        <div class="picker">
-            <button id="btn-output">Select Output Folder…</button>
-            <span id="output-path" class="path-label">No folder selected</span>
+        <!-- Step 3 progress: only while Generate / Regenerate / Commit runs. -->
+        <div id="gen-progress" class="progress-hidden">
+            <div id="gen-progress-label" class="progress-label"></div>
+            <div class="progress-bar"><div id="gen-progress-fill" class="progress-fill"></div></div>
         </div>
+        <div id="gen-message" class="run-message"></div>
+        <div class="batch-bar">
+            <span id="status-counts" class="status-counts"></span>
+            <button id="btn-commit-all" disabled>Commit All Ready</button>
+        </div>
+    </section>
+    </div>
 
-        <button id="btn-generate" disabled>Generate Posters</button>
+    <!-- Always-visible bottom area: step 4, the final action of the workflow. -->
+    <div id="footer-bar">
+        <div id="active-product" class="active-product hidden">
+            <span class="active-caption">Working in:</span>
+            <span id="active-name" class="active-name"></span>
+            <span id="active-actions"></span>
+        </div>
+        <div class="export-row">
+            <h2>4. Export</h2>
+            <button id="btn-export" disabled>Export All Committed</button>
+        </div>
+        <!-- Export progress: only while exporting / previewing. -->
         <div id="progress" class="progress-hidden">
-            <div id="progress-bar"><div id="progress-fill"></div></div>
-            <div id="progress-label"></div>
+            <div id="progress-label" class="progress-label"></div>
+            <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
         </div>
-        <div id="generate-summary" class="summary"></div>
-    </section>
+        <div id="export-message" class="run-message"></div>
+    </div>
+
+    <!-- Shared modal: the ⋯ More menu and confirmations. -->
+    <dialog id="action-dialog">
+        <form method="dialog" class="dialog-body">
+            <h3 id="dialog-title"></h3>
+            <p id="dialog-message" class="dialog-message"></p>
+            <div id="dialog-buttons" class="dialog-buttons"></div>
+        </form>
+    </dialog>
 
     <script src="js/lib/xlsx.full.min.js"></script>
     <script src="js/index.js"></script>

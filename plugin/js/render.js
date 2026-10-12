@@ -11,7 +11,9 @@
 // from the template's file name (same rule as datamerge.js). Which pages are
 // exported is fixed by the DANIS/Service output rules below; each product's
 // populated document is saved once to InDesign/<type>/ and its JPGs are
-// exported to output/<type>/<WxH>/ (see renderAll).
+// exported to output/<type>/<WxH>/. Two steps: generateIndds() builds and
+// saves the populated INDDs; exportFromIndds() exports the JPGs from them
+// (Preview / Commit all), so edits made in the INDDs reach the JPGs.
 //
 // require("indesign") is called lazily (inside functions, not at module top)
 // so that if it's ever unavailable, only render actions fail — the rest of
@@ -606,9 +608,14 @@ function placeImageFill(frame, imagePath) {
     }
 }
 
-function exportPageAsJPEG(doc, page, outputPath) {
+// Final JPGs: 72 dpi (page points = output pixels). Preview JPGs use a lower
+// resolution — they only need to be looked at, not delivered.
+const FINAL_RESOLUTION = 72;
+const PREVIEW_RESOLUTION = 36;
+
+function exportPageAsJPEG(doc, page, outputPath, resolution) {
     const { app, ExportFormat, ExportRangeOrAllPages, JpegColorSpaceEnum, JPEGOptionsQuality } = indesign();
-    app.jpegExportPreferences.exportResolution = 72;
+    app.jpegExportPreferences.exportResolution = resolution || FINAL_RESOLUTION;
     app.jpegExportPreferences.jpegQuality = JPEGOptionsQuality.MAXIMUM;
     app.jpegExportPreferences.jpegColorSpace = JpegColorSpaceEnum.RGB;
     app.jpegExportPreferences.jpegExportRange = ExportRangeOrAllPages.EXPORT_RANGE;
@@ -940,12 +947,7 @@ async function inspectTemplates(templatePaths) {
             if (framesOk) {
                 const plan = planPages(doc, subType);
                 for (const pr of plan.problems) problems.push(`${name}: ${pr}`);
-                templates.push({
-                    path, name, subType,
-                    mapping: plan.mapping,
-                    exportCount: plan.pages.filter((pg) => pg.layout.position !== "footer").length,
-                    hasFooterPage: plan.pages.some((pg) => pg.layout.position === "footer"),
-                });
+                templates.push({ path, name, subType, mapping: plan.mapping });
             }
         } catch (e) {
             problems.push(`${name}: could not open (${e})`);
@@ -963,92 +965,116 @@ async function inspectTemplates(templatePaths) {
     return templates;
 }
 
-// JPGs one product + template produces: the always-exported pages, plus the
-// DANIS footer page only when DANIS ADD ON has content.
-function exportCountFor(t, rec) {
-    return t.exportCount + (t.hasFooterPage && hasAddOn(rec) ? 1 : 0);
+// ---------- run bookkeeping (log lines, counts, progress) ----------
+
+function makeRun(totalOps, onProgress) {
+    const run = {
+        logLines: ["timestamp,headline,page_label,output_file,status,message"],
+        failures: [],
+        successCount: 0,
+        errorCount: 0,
+        done: 0,
+        total: totalOps,
+    };
+    const csv = (v) => String(v == null ? "" : v).replace(/,/g, ";");
+    run.line = (headline, label, outPath, status, message) => {
+        run.logLines.push([new Date().toISOString(), csv(headline), csv(label), csv(outPath), status, csv(message)].join(","));
+    };
+    run.success = (headline, label, outPath, note) => {
+        run.line(headline, label, outPath, "success", note || "");
+        run.successCount++;
+    };
+    run.error = (headline, label, outPath, e) => {
+        run.line(headline, label, outPath, "error", String(e));
+        run.errorCount++;
+        run.failures.push({ headline, label, message: String(e) });
+    };
+    run.tick = (message, n) => {
+        run.done += n || 1;
+        if (onProgress) onProgress(run.done, run.total, message);
+    };
+    run.result = (extra) => Object.assign({
+        successCount: run.successCount, errorCount: run.errorCount,
+        logLines: run.logLines, failures: run.failures,
+    }, extra || {});
+    return run;
 }
 
-// manifestRows: array from matcher.js's buildManifest() (only "matched" rows are rendered)
-// templatePaths: absolute paths to the prepared <name>_DataMerge.indd files
-// outputRootPath: the selected root folder; creates output/… and InDesign/… in it
-// onProgress: optional callback(current, total, message) for UI progress updates
-// Returns: { successCount, errorCount, logLines: string[], failures: [{headline, label, message}] }
-//
-// Per product and template, in two phases on ONE working copy:
-//   A. open a fresh copy of the template, populate every page (image,
-//      headline, subline, footer), detach Data Merge, validate every page,
-//      then save that same document as InDesign/<type>/<…>.indd — only if
-//      validation passed;
-//   B. export the JPGs from the pages of that saved document into
-//      output/<type>/<WxH>/.
-// So the INDD and the JPGs always hold exactly the same content. If phase A
-// fails, nothing is saved or exported for that product + template.
-//
-// Why images went missing before: the working copy still had its native
-// @MainImage Data Merge placeholders bound to the image frames, and pages
-// were filled and exported one at a time with no check of the final
-// document — an image placed into a still-bound placeholder frame could be
-// lost again before the INDD was saved. The placeholders are now unbound
-// first, and every page is checked for a placed image before saving.
-async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress) {
-    const logLines = ["timestamp,headline,page_label,output_file,status,message"];
-    const failures = [];
-    if (!templatePaths || !templatePaths.length) {
-        throw new Error("No templates selected — pick the <name>_DataMerge.indd files made by step 1.");
-    }
+// Where the product INDD for this template type lives:
+// <root>/InDesign/<DANIS|Service>/<DANIS_Herbst|Service_Herbst>_<year>_<product>.indd
+// (used to find INDDs generated in an earlier session or before a Reload).
+// Returns { subType, inddPath }.
+function inddPathFor(rec, templatePath, outputRootPath) {
+    const subType = subTypeFromPath(templatePath);
+    const inddPath = [outputRootPath.replace(/\/+$/, ""), "InDesign", TYPE_FOLDER[subType],
+        buildInddFileName(rec, subType)].join("/");
+    return { subType, inddPath };
+}
 
+// ---------- generate the product INDDs (Generate All / Regenerate) ----------
+
+// manifestRows: rows from matcher.js's buildManifest() — the whole batch
+//   ("Generate All") or a single row ("Regenerate"); only "matched" rows are used
+// templatePaths: absolute paths to the prepared <name>_DataMerge.indd files
+// outputRootPath: the selected root folder; INDDs go to InDesign/<type>/ in it
+// onProgress: optional callback(current, total, message)
+// Returns: { successCount, errorCount, logLines, failures: [{headline, label, message}],
+//            generated: [{rec, subType, inddPath, warnings: string[]}],
+//            failed: [{rec, subType, inddPath, error}] }
+//
+// Per product and template, on ONE working copy: open a fresh copy of the
+// template, populate every page (image, headline, subline, footer), detach
+// Data Merge, validate every page, then save it as InDesign/<type>/<…>.indd —
+// only if validation passed. No JPGs are exported here: they come from the
+// saved INDDs via exportFromIndds() (Preview / Commit all), so any fixes made
+// in the INDDs in between end up in the JPGs.
+//
+// Why images once went missing: the working copy still had its native
+// @MainImage Data Merge placeholders bound to the image frames, and nothing
+// checked the final document — an image placed into a still-bound
+// placeholder frame could be lost before the INDD was saved. The
+// placeholders are now unbound first, and every page is checked for a
+// placed image before saving.
+async function generateIndds(manifestRows, templatePaths, outputRootPath, onProgress) {
+    if (!templatePaths || !templatePaths.length) {
+        throw new Error("No templates — prepare the client template in step 1 first.");
+    }
     const templates = await inspectTemplates(templatePaths);
     const root = outputRootPath.replace(/\/+$/, "");
     const inddFolder = {};
     for (const t of templates) inddFolder[t.subType] = await ensureFolders(root, ["InDesign", TYPE_FOLDER[t.subType]]);
 
     const matchedRows = manifestRows.filter((r) => r.status === "matched");
-    // Per product + template: one op per exported JPG plus one for the INDD.
-    let totalOps = 0;
-    for (const rec of matchedRows) for (const t of templates) totalOps += exportCountFor(t, rec) + 1;
-    let done = 0;
-    let successCount = 0;
-    let errorCount = 0;
+    const run = makeRun(matchedRows.length * templates.length, onProgress);
+    for (const t of templates) run.line("", `${t.name} layouts`, "", "info", t.mapping);
 
-    const csv = (v) => String(v == null ? "" : v).replace(/,/g, ";");
-    const logLine = (headline, label, outPath, status, message) => {
-        logLines.push([new Date().toISOString(), csv(headline), csv(label), csv(outPath), status, csv(message)].join(","));
-    };
-    const logSuccess = (headline, label, outPath, note) => {
-        logLine(headline, label, outPath, "success", note || "");
-        successCount++;
-    };
-    const logError = (headline, label, outPath, e) => {
-        logLine(headline, label, outPath, "error", String(e));
-        errorCount++;
-        failures.push({ headline, label, message: String(e) });
-    };
-    const tick = (message, n) => {
-        done += n || 1;
-        if (onProgress) onProgress(done, totalOps, message);
-    };
-
-    for (const t of templates) logLine("", `${t.name} layouts`, "", "info", t.mapping);
-
-    const usedJpg = new Set();
+    const generated = [];
+    const failed = [];
     const usedIndd = new Set();
-
     for (const rec of matchedRows) {
         const headline = rec.headline;
-
         for (const t of templates) {
-            const ops = exportCountFor(t, rec) + 1;
             const inddName = uniqueName(buildInddFileName(rec, t.subType), usedIndd);
             const inddPath = inddFolder[t.subType] + "/" + inddName;
+            const label = `${t.name} indd`;
+            const fail = (e) => {
+                run.error(headline, label, inddPath, e);
+                failed.push({ rec, subType: t.subType, inddPath, error: String((e && e.message) || e) });
+            };
             if (templatePaths.some((tp) => samePath(tp, inddPath))) {
-                logError(headline, `${t.name} indd`, inddPath, new Error("Refusing to overwrite template: " + inddPath));
-                tick(`${headline} — ${t.name} (skipped)`, ops);
+                fail(new Error("Refusing to overwrite template: " + inddPath));
+                run.tick(`${headline} — ${t.name} (skipped)`);
+                continue;
+            }
+            // A product INDD the user has open (e.g. from a previous run)
+            // can't be overwritten while open.
+            if (findOpenDocument(inddPath)) {
+                fail(new Error("this INDD is open in InDesign — close it, then generate again"));
+                run.tick(`${headline} — ${inddName} (open)`);
                 continue;
             }
 
             let doc = null;
-            let opsDone = 0;
             try {
                 try {
                     doc = await openTemplateCopy(t.path);
@@ -1058,45 +1084,230 @@ async function renderAll(manifestRows, templatePaths, outputRootPath, onProgress
                 usePoints(doc);
                 unlockAll(doc);
 
-                // ---- PHASE A: populate, validate, save ----
                 const result = populateDocument(doc, t, rec);
-                for (const r of result.reports) logLine(headline, `${t.name} check`, "", "info", r);
+                for (const r of result.reports) run.line(headline, `${t.name} check`, "", "info", r);
                 if (result.errors.length) {
                     throw new Error("not saved — " + result.errors.join(" / "));
                 }
                 await saveWhenIdle(doc, inddPath);
-                logSuccess(headline, `${t.name} indd`, inddPath, "populated + validated");
-                opsDone++;
-                tick(`${headline} — ${inddName}`);
-
-                // ---- PHASE B: export from the saved, populated document ----
-                for (const pg of result.plan.pages) {
-                    if (!pg.export) continue;
-                    const label = `${t.name} ${pg.layout.key} ${pg.layout.size}`;
-                    let outPath = "";
-                    try {
-                        const dir = await ensureFolders(root, ["output", TYPE_FOLDER[t.subType], pg.layout.size]);
-                        outPath = dir + "/" + uniqueName(buildOutputFileName(rec, pg.layout), usedJpg);
-                        exportPageAsJPEG(doc, doc.pages.item(pg.index), outPath);
-                        logSuccess(headline, label, outPath, pg.fitNote);
-                    } catch (e) {
-                        logError(headline, label, outPath, e);
-                    }
-                    opsDone++;
-                    tick(`${headline} — ${label}`);
-                }
+                const warnings = result.reports.filter((r) => /^WARNING /.test(r));
+                run.success(headline, label, inddPath, "populated + validated" +
+                    (warnings.length ? ` (${warnings.length} warning(s))` : ""));
+                generated.push({ rec, subType: t.subType, inddPath, warnings });
             } catch (e) {
-                // Phase A failed (or the open/save did): nothing saved/exported.
-                logError(headline, `${t.name} indd`, inddPath, e);
+                // Nothing saved for this product + template.
+                fail(e);
             } finally {
                 closeWithoutSaving(doc);
                 await settle(250);
             }
-            if (opsDone < ops) tick(`${headline} — ${t.name}`, ops - opsDone);
+            run.tick(`${headline} — ${inddName}`);
         }
     }
+    return run.result({ generated, failed });
+}
 
-    return { successCount, errorCount, logLines, failures };
+// ---------- export JPGs from the product INDDs (Preview / Commit) ----------
+
+// Native path of an open document (fullName comes back as a string or a
+// File-like object depending on the DOM build). "" for an unsaved document.
+function documentPath(doc) {
+    try {
+        const f = doc.fullName;
+        const p = typeof f === "string" ? f : (f && (f.nativePath || f.fsName)) || "";
+        return String(p).replace(/^file:(\/\/)?/, "");
+    } catch (e) {
+        return "";
+    }
+}
+
+// The open document saved at `path`, or null.
+function findOpenDocument(path) {
+    const { app } = indesign();
+    try {
+        for (let i = 0; i < app.documents.length; i++) {
+            const doc = app.documents.item(i);
+            if (samePath(documentPath(doc), path)) return doc;
+        }
+    } catch (e) {}
+    return null;
+}
+
+// True if the product INDD at `path` is open in InDesign.
+function isInddOpen(path) {
+    return !!findOpenDocument(path);
+}
+
+// Closes an open product INDD WITHOUT saving (Regenerate after the user
+// confirmed that manual edits will be discarded). No-op if it isn't open.
+async function closeIndd(path) {
+    const doc = findOpenDocument(path);
+    if (!doc) return;
+    closeWithoutSaving(doc);
+    await settle(250);
+}
+
+// Path of InDesign's active (front) document, or "" — lets the panel show
+// the actions of the product INDD the designer is working in.
+function activeDocumentPath() {
+    try {
+        const { app } = indesign();
+        if (!app || !app.documents.length) return "";
+        return documentPath(app.activeDocument);
+    } catch (e) {
+        return "";
+    }
+}
+
+// Opens a product INDD in InDesign (with a window), or brings it to the
+// front if it's already open. Returns the document's name.
+async function openIndd(path) {
+    const { app } = indesign();
+    if (!(await pathExists(path))) throw new Error("INDD not found: " + path);
+    const open = findOpenDocument(path);
+    if (open) {
+        try { app.activeDocument = open; } catch (e) {}
+        return open.name;
+    }
+    return app.open(path, true).name;
+}
+
+// What would make this page's JPG wrong: an empty image frame, or text that
+// doesn't fit its frame. Text is NOT compared with the Excel here — it may
+// have been edited on purpose in the INDD.
+function pageWarnings(page) {
+    const warnings = [];
+    const imageFrame = findImageFrame(page);
+    if (!imageFrame || graphicInfo(imageFrame).count < 1) warnings.push("MainImage frame is empty");
+    const headlineFrame = findHeadlineFrame(page);
+    if (headlineFrame && oversets(headlineFrame)) warnings.push("headline/subline doesn't fit its frame");
+    const footerFrame = findFooterFrame(page);
+    if (footerFrame && oversets(footerFrame)) warnings.push("footer doesn't fit its frame");
+    return warnings;
+}
+
+// Preview JPGs of one product: <root>/preview/<DANIS|Service>/<product>/
+// (same folder every time, so previewing again overwrites the old preview).
+function previewFolderFor(root, rec, subType) {
+    return ensureFolders(root, ["preview", TYPE_FOLDER[subType], productToken(rec.headline)]);
+}
+
+// The production folder of a template type: <root>/output/<DANIS|Service>.
+function outputFolderFor(outputRootPath, subType) {
+    return [outputRootPath.replace(/\/+$/, ""), "output", TYPE_FOLDER[subType]].join("/");
+}
+
+// items: [{rec, subType, inddPath}] — ONE product (row Preview / Commit) or
+//   many ("Commit All Ready"); same code path either way
+// outputRootPath: the selected root folder
+// onProgress: optional callback(current, total, message)
+// options.preview: true  -> low-res JPGs into preview/<type>/<product>/ — for
+//                           looking only; output/ untouched, nothing saved
+//                  false -> final JPGs into output/<type>/<WxH>/ (Commit)
+// options.skipIfWarnings: true -> check every page first and do nothing for a
+//   product with warnings (it becomes "Review" instead — never commit or
+//   export a problem file silently)
+// options.checkOnly: true -> "Commit": save unsaved edits of an open INDD and
+//   check every page, but export NO JPGs (outcome.committed)
+// Returns: { successCount, errorCount, logLines, failures,
+//            items: [{inddPath, exported, committed, warnings: string[], error, folder}] }
+//
+// Exports from the INDD as it is now: an INDD the user has open is exported
+// including their edits — on Commit it's saved first, so INDD and JPGs stay
+// identical — and left open; an INDD that isn't open is opened without a
+// window and closed again. Pages are re-classified from the INDD itself
+// (OUTPUT_RULES), so a DANIS INDD without a footer page yields no footer JPG.
+async function exportFromIndds(items, outputRootPath, onProgress, options) {
+    const preview = !!(options && options.preview);
+    const skipIfWarnings = !!(options && options.skipIfWarnings);
+    const checkOnly = !!(options && options.checkOnly);
+    const root = outputRootPath.replace(/\/+$/, "");
+    const run = makeRun(items.length, onProgress);
+    const usedJpg = new Set();
+    const outcomes = [];
+
+    for (const item of items) {
+        const { rec, subType, inddPath } = item;
+        const headline = rec.headline;
+        const label = basename(inddPath);
+        const outcome = { inddPath, exported: false, committed: false, warnings: [], error: "", folder: "" };
+        outcomes.push(outcome);
+        let doc = null;
+        let openedHere = false;
+        try {
+            if (!(await pathExists(inddPath))) throw new Error("INDD not found — generate it first");
+            doc = findOpenDocument(inddPath);
+            if (!doc) {
+                doc = indesign().app.open(inddPath, false);
+                openedHere = true;
+            }
+            usePoints(doc);
+
+            const plan = planPages(doc, subType);
+            if (plan.problems.length) throw new Error("INDD layouts don't match the output rules: " + plan.problems.join(" / "));
+
+            // Check every page before exporting anything.
+            for (const pg of plan.pages) {
+                for (const w of pageWarnings(doc.pages.item(pg.index))) {
+                    outcome.warnings.push(`${pg.layout.key} ${pg.layout.size}: ${w}`);
+                }
+            }
+            if (skipIfWarnings && outcome.warnings.length) {
+                run.line(headline, label, inddPath, "skipped", "needs review — " + outcome.warnings.join(" / "));
+                run.tick(`${headline} — needs review (skipped)`);
+                continue;
+            }
+
+            if (!preview && !openedHere && doc.modified) {
+                await saveWhenIdle(doc);
+                run.line(headline, label, inddPath, "info", "open INDD had unsaved edits — saved");
+            }
+            if (checkOnly) {
+                outcome.committed = true;
+                run.success(headline, label, inddPath, "saved + checked" +
+                    (outcome.warnings.length ? " — WARNING: " + outcome.warnings.join(" / ") : ""));
+                run.tick(`${headline} — ${label}`);
+                continue;
+            }
+            outcome.folder = preview ? await previewFolderFor(root, rec, subType) : outputFolderFor(root, subType);
+
+            let pageErrors = 0;
+            for (const pg of plan.pages) {
+                const page = doc.pages.item(pg.index);
+                const pageLabel = `${label} ${pg.layout.key} ${pg.layout.size}`;
+                let outPath = "";
+                try {
+                    const dir = preview
+                        ? outcome.folder
+                        : await ensureFolders(root, ["output", TYPE_FOLDER[subType], pg.layout.size]);
+                    outPath = dir + "/" + uniqueName(buildOutputFileName(rec, pg.layout), usedJpg);
+                    exportPageAsJPEG(doc, page, outPath, preview ? PREVIEW_RESOLUTION : FINAL_RESOLUTION);
+                    const notes = pageWarnings(page).map((w) => "WARNING: " + w);
+                    run.success(headline, pageLabel, outPath, notes.join(" / "));
+                } catch (e) {
+                    pageErrors++;
+                    run.error(headline, pageLabel, outPath, e);
+                }
+            }
+            outcome.exported = pageErrors === 0;
+            if (pageErrors) outcome.error = `${pageErrors} page(s) failed to export`;
+        } catch (e) {
+            outcome.error = String((e && e.message) || e);
+            run.error(headline, label, inddPath, e);
+        } finally {
+            if (openedHere) {
+                closeWithoutSaving(doc);
+                await settle(250);
+            }
+        }
+        run.tick(`${headline} — ${label}`);
+    }
+    return run.result({ items: outcomes });
+}
+
+// "danis" / "service" for a prepared template path (same rule as Render).
+function typeOfTemplate(path) {
+    return subTypeFromPath(path);
 }
 
 async function writeLog(logLines, logPath) {
@@ -1106,4 +1317,8 @@ async function writeLog(logLines, logPath) {
     await fileEntry.write(logLines.join("\n") + "\n");
 }
 
-module.exports = { checkAudiFont, renderAll, writeLog, debugModuleShape };
+module.exports = {
+    checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
+    isInddOpen, closeIndd, activeDocumentPath,
+    outputFolderFor, typeOfTemplate, TYPE_FOLDER, writeLog, debugModuleShape,
+};
