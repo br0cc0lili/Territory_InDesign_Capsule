@@ -32,7 +32,6 @@ let excelEntry = null;
 let photosEntry = null;
 let outputEntry = null;
 let manifestRows = [];
-let dmCsvEntry = null;
 // The prepared template set: the <name>_DataMerge.indd from step 1. It
 // decides the output type (DANIS or Service) for the whole run, so it holds
 // ONE template — preparing another one replaces it.
@@ -47,8 +46,6 @@ const el = {
     loadErrorBanner: document.getElementById("load-error-banner"),
     fontBanner: document.getElementById("font-banner"),
     btnReload: document.getElementById("btn-reload"),
-    btnDmCsv: document.getElementById("btn-dm-csv"),
-    dmCsvPath: document.getElementById("dm-csv-path"),
     btnDmPrepare: document.getElementById("btn-dm-prepare"),
     dmSummary: document.getElementById("dm-summary"),
     btnExcel: document.getElementById("btn-excel"),
@@ -57,7 +54,7 @@ const el = {
     photosPath: document.getElementById("photos-path"),
     btnMatch: document.getElementById("btn-match"),
     matchSummary: document.getElementById("match-summary"),
-    resultsBody: document.querySelector("#results tbody"),
+    resultsBody: document.getElementById("results"),
     templateList: document.getElementById("template-list"),
     btnOutput: document.getElementById("btn-output"),
     outputPath: document.getElementById("output-path"),
@@ -88,7 +85,6 @@ const el = {
 // ⟳ Reload button deliberately clears all of it (see resetPanel).
 
 const STORE = {
-    dmCsv: "posterBatch.dmCsvPath",
     excel: "posterBatch.excelPath",
     photos: "posterBatch.photosPath",
     output: "posterBatch.outputPath",
@@ -159,8 +155,6 @@ function rowState(rec) {
 // ---------- restore ----------
 
 async function restoreSelections() {
-    dmCsvEntry = await entryFor(recall(STORE.dmCsv));
-    if (dmCsvEntry) el.dmCsvPath.textContent = dmCsvEntry.name;
     excelEntry = await entryFor(recall(STORE.excel));
     if (excelEntry) el.excelPath.textContent = excelEntry.name;
     photosEntry = await entryFor(recall(STORE.photos));
@@ -186,13 +180,11 @@ function showContext() {
         const label = t && render ? render.TYPE_FOLDER[t] : "?";
         el.templateList.textContent = `${label} (${templatePaths[0].split("/").pop()})`;
     } else {
-        el.templateList.textContent = "None yet — prepare one in step 1";
+        el.templateList.textContent = "None yet — open the client template and prepare it";
     }
     if (outputEntry) {
-        const t = templatePaths.length ? templateTypeOf(templatePaths[0]) : null;
-        el.outputPath.textContent = t && render
-            ? render.outputFolderFor(outputEntry.nativePath, t) + "/"
-            : outputEntry.nativePath;
+        // The folder the user picked (step 1); JPGs go to output/<type>/ in it.
+        el.outputPath.textContent = outputEntry.nativePath;
     } else {
         el.outputPath.textContent = "No folder selected";
     }
@@ -215,7 +207,7 @@ function updateButtons() {
     el.btnGenerate.disabled = busy || !(hasMatchedRows() && outputEntry && templatePaths.length);
     el.btnCommitAll.disabled = busy || readyRows().length === 0;
     el.btnExport.disabled = busy || !outputEntry || committedRows().length === 0;
-    el.btnDmPrepare.disabled = busy || !dmCsvEntry;
+    el.btnDmPrepare.disabled = busy || !excelEntry;
 }
 
 function setBusy(on) {
@@ -394,13 +386,12 @@ function resetPanel() {
     for (const key of Object.values(STORE)) {
         try { localStorage.removeItem(key); } catch (e) {}
     }
-    excelEntry = photosEntry = outputEntry = dmCsvEntry = null;
+    excelEntry = photosEntry = outputEntry = null;
     manifestRows = [];
     templatePaths = [];
     products = new Map();
     statuses = {};
     activeRec = null;
-    el.dmCsvPath.textContent = "No file selected";
     el.excelPath.textContent = "No file selected";
     el.photosPath.textContent = "No folder selected";
     for (const node of [el.dmSummary, el.matchSummary, el.statusCounts]) {
@@ -427,7 +418,7 @@ el.btnReload.addEventListener("click", () => {
     try { location.reload(); } catch (e) {}
 });
 
-// ---------- step 2: inputs ----------
+// ---------- step 1: inputs ----------
 
 el.btnExcel.addEventListener("click", async () => {
     let entry;
@@ -459,38 +450,23 @@ el.btnPhotos.addEventListener("click", async () => {
     updateButtons();
 });
 
-// ---------- step 1: prepare ----------
-
-el.btnDmCsv.addEventListener("click", async () => {
-    let entry;
-    try {
-        entry = await fs.getFileForOpening({ types: ["xlsx", "csv", "txt"] });
-    } catch (e) {
-        el.dmCsvPath.textContent = errorText(e);
-        return;
-    }
-    if (!entry) return;
-    dmCsvEntry = entry;
-    remember(STORE.dmCsv, entry.nativePath);
-    el.dmCsvPath.textContent = entry.name;
-    el.dmSummary.textContent = "";
-    updateButtons();
-});
+// ---------- step 2: template (prepare) ----------
 
 el.btnDmPrepare.addEventListener("click", async () => {
     if (!datamerge) {
         el.dmSummary.textContent = "datamerge.js failed to load — see the banner above.";
         return;
     }
-    const source = dmCsvEntry;
+    // Same Excel file as Match (step 1).
+    const source = excelEntry;
     setBusy(true);
     el.dmSummary.textContent = "Saving a working copy and preparing it…";
 
     try {
         if (!(await waitForInDesign())) throw new Error(NOT_READY);
-        // Data Merge only reads CSV/TXT: convert an Excel pick first. Step 2's
-        // photos folder is used to fill @MainImage only if it happens to be
-        // chosen already — preparing the template never requires it.
+        // Data Merge only reads CSV/TXT: convert the Excel first. The photos
+        // folder (step 1) fills @MainImage only if it's chosen already —
+        // preparing the template never requires it.
         let csvPath = source.nativePath;
         if (/\.xlsx$/i.test(source.name)) {
             el.dmSummary.textContent = "Converting Excel to a Data Merge CSV…";
@@ -520,7 +496,7 @@ el.btnDmPrepare.addEventListener("click", async () => {
     }
 });
 
-// ---------- step 3: match, output folder ----------
+// ---------- step 1: output folder ----------
 
 el.btnOutput.addEventListener("click", async () => {
     let entry;
@@ -589,12 +565,19 @@ const STATE_LABEL = {
     "no-asset": ["No asset", "status-muted"],
 };
 
-function cell(text, className, title) {
-    const td = document.createElement("td");
-    td.textContent = text;
-    if (className) td.className = className;
-    if (title) td.title = title;
-    return td;
+// Button labels, shared by the product list, the "Working in" bar and ⋯.
+const LABEL = {
+    open: "Open .indd",
+    preview: "Preview Image Batch",
+    commit: "Commit .indd",
+    more: "⋯",
+};
+
+function div(className, text) {
+    const d = document.createElement("div");
+    if (className) d.className = className;
+    if (text) d.textContent = text;
+    return d;
 }
 
 function button(label, onClick, title) {
@@ -607,68 +590,75 @@ function button(label, onClick, title) {
     return btn;
 }
 
+// "2026-10-13 14:20" — readable without relying on toLocaleString in UXP.
+function shortTime(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return "";
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// Detail lines shown under a product — everything that used to be hidden in
+// hover tooltips (UXP panels don't reliably show them).
+const MAX_WARNINGS = 3;
+function detailLines(rec, state, s) {
+    const lines = [];
+    if (rec.status !== "matched") {
+        lines.push(["detail-muted", rec.notes || "No image matched this row"]);
+        return lines;
+    }
+    if (rec.imagePath) lines.push(["detail-muted", "Image: " + rec.imagePath.split("/").pop()]);
+    if (state === "unchecked") lines.push(["detail-muted", "Existing .indd found — not checked yet. Preview or commit it."]);
+    if (s && s.error) lines.push(["detail-error", "✗ " + s.error]);
+    const warnings = (s && s.warnings) || [];
+    for (const w of warnings.slice(0, MAX_WARNINGS)) lines.push(["detail-warning", "⚠ " + w]);
+    if (warnings.length > MAX_WARNINGS) {
+        lines.push(["detail-warning", `⚠ …and ${warnings.length - MAX_WARNINGS} more (see the log)`]);
+    }
+    if (s && s.exportedAt) lines.push(["detail-muted", "Exported " + shortTime(s.exportedAt)]);
+    else if (s && s.committedAt) lines.push(["detail-muted", "Committed " + shortTime(s.committedAt)]);
+    return lines;
+}
+
+// The product list: one block per Excel row / photo folder —
+//   line 1: product name · status
+//   then  : detail lines (image, warnings, errors, commit time)
+//   last  : actions (Open .indd · Preview Image Batch · Commit .indd · ⋯),
+//           wrapping onto more lines in a narrow panel.
 function renderTable() {
     el.resultsBody.innerHTML = "";
     for (const rec of manifestRows) {
-        const tr = document.createElement("tr");
-        tr.className = rec.status === "matched" ? "row-matched" : "row-skipped";
-        if (activeRec === rec) tr.className += " row-active";
+        const row = div("product-row " + (rec.status === "matched" ? "row-matched" : "row-skipped") +
+            (activeRec === rec ? " row-active" : ""));
         const state = rowState(rec);
         const p = products.get(rec);
         const s = p ? getStatus(p.inddPath) : null;
 
-        // Product
-        tr.appendChild(cell(rec.headline || "(no headline)"));
-
-        // Match: ✓ / ✗ with the details on hover.
-        if (rec.status === "matched") {
-            const scoreMatch = rec.notes && rec.notes.match(/score=([\d.]+)/);
-            tr.appendChild(cell("✓", "match-ok", [
-                rec.imagePath ? rec.imagePath.split("/").pop() : "",
-                scoreMatch ? "score " + scoreMatch[1] : "",
-            ].filter(Boolean).join(" — ")));
-        } else {
-            tr.appendChild(cell("✗", "match-no", rec.notes || rec.status));
-        }
-
-        // INDD: Open (opening it is how the designer edits it). An INDD that
-        // was already on disk and hasn't been generated or checked in this
-        // session is labelled "Existing" — Match only finds it, never makes it.
-        const inddTd = cell("", "nowrap");
-        if (p && p.exists) {
-            if (state === "unchecked") inddTd.appendChild(document.createTextNode("Existing · "));
-            inddTd.appendChild(button("Open", () => openRow(rec), p.inddPath));
-        } else {
-            inddTd.textContent = rec.status === "matched" ? "—" : "";
-        }
-        tr.appendChild(inddTd);
-
-        // Status, with warnings / error / commit time on hover.
+        const head = div("product-head");
+        head.appendChild(div("product-name", rec.headline || "(no headline)"));
         const [label, cls] = STATE_LABEL[state];
-        const tip = s
-            ? [s.error, (s.warnings || []).join("\n"), s.committedAt ? "Committed " + s.committedAt : "",
-                s.exportedAt ? "Exported " + s.exportedAt : ""]
-                .filter(Boolean).join("\n")
-            : "";
-        tr.appendChild(cell(label, "nowrap " + cls, tip));
+        head.appendChild(div("product-status " + cls, label));
+        row.appendChild(head);
 
-        // Actions: Preview · Commit · ⋯
-        const actionsTd = cell("", "actions-cell");
+        for (const [cls2, text] of detailLines(rec, state, s)) row.appendChild(div("product-detail " + cls2, text));
+
         if (rec.status === "matched") {
+            const actions = div("product-actions");
             const hasIndd = !!(p && p.exists);
-            const preview = button("Preview", () => previewRow(rec), "Export low-res JPGs of this product and show them");
-            const commit = button("Commit", () => commitRow(rec),
-                "Save + check this INDD and mark it Committed (no JPG export — that's step 4)");
+            if (hasIndd) actions.appendChild(button(LABEL.open, () => openRow(rec), p.inddPath));
+            const preview = button(LABEL.preview, () => previewRow(rec), "Export low-res JPGs of this product and show them");
+            const commit = button(LABEL.commit, () => commitRow(rec),
+                "Save + check this .indd and mark it Committed (no JPG export — that's step 4)");
             preview.disabled = busy || !hasIndd;
             commit.disabled = busy || !hasIndd;
-            actionsTd.appendChild(preview);
-            actionsTd.appendChild(commit);
-            const more = button("⋯", () => moreMenu(rec), "More actions");
+            actions.appendChild(preview);
+            actions.appendChild(commit);
+            const more = button(LABEL.more, () => moreMenu(rec), "More actions");
             more.disabled = busy || !p;
-            actionsTd.appendChild(more);
+            actions.appendChild(more);
+            row.appendChild(actions);
         }
-        tr.appendChild(actionsTd);
-        el.resultsBody.appendChild(tr);
+        el.resultsBody.appendChild(row);
     }
     renderActiveProduct();
     updateCounts();
@@ -691,9 +681,9 @@ function renderActiveProduct() {
     }
     el.activeName.textContent = activeRec.headline;
     const rec = activeRec;
-    const preview = button("Preview", () => previewRow(rec));
-    const commit = button("Commit", () => commitRow(rec));
-    const more = button("⋯", () => moreMenu(rec), "More actions");
+    const preview = button(LABEL.preview, () => previewRow(rec));
+    const commit = button(LABEL.commit, () => commitRow(rec));
+    const more = button(LABEL.more, () => moreMenu(rec), "More actions");
     commit.disabled = busy;
     for (const b of [preview, commit, more]) el.activeActions.appendChild(b);
     el.activeProduct.classList.remove("hidden");
@@ -790,10 +780,10 @@ el.btnGenerate.addEventListener("click", async () => {
     await refreshProducts();
     const existing = [...products.values()].filter((p) => p.exists).length;
     if (existing) {
-        const go = await showDialog("Generate All",
+        const go = await showDialog("Generate All .indd",
             `${existing} product INDD(s) already exist and will be replaced — manual edits in them will be lost.\n\n` +
-            "To rebuild just one product, use its ⋯ → Regenerate instead.",
-            [{ label: "Replace and Generate All", value: "go", danger: true }]);
+            "To rebuild just one product, use its ⋯ → Regenerate .indd instead.",
+            [{ label: "Replace and Generate All .indd", value: "go", danger: true }]);
         if (go !== "go") return;
     }
     try {
@@ -920,7 +910,7 @@ async function commitRow(rec) {
 async function moreMenu(rec) {
     const p = products.get(rec);
     const choice = await showDialog(rec.headline, p.inddPath.split("/").pop(), [
-        { label: p.exists ? "Regenerate INDD" : "Generate INDD", value: "regenerate", danger: p.exists },
+        { label: p.exists ? "Regenerate .indd" : "Generate .indd", value: "regenerate", danger: p.exists },
         { label: "Open Output Folder", value: "output" },
     ]);
     if (choice === "regenerate") await regenerateRow(rec);
@@ -934,7 +924,7 @@ async function regenerateRow(rec) {
     const p = products.get(rec);
     const open = p.exists && render.isInddOpen(p.inddPath);
     if (p.exists) {
-        const go = await showDialog("Regenerate INDD?",
+        const go = await showDialog("Regenerate .indd?",
             "Regenerating will replace the current INDD and may discard manual edits. Continue?" +
             (open ? "\n\nThis INDD is open in InDesign — it will be closed without saving first." : ""),
             [{ label: "Regenerate", value: "go", danger: true }]);

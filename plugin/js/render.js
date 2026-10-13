@@ -524,7 +524,7 @@ function setHeadlineText(doc, frame, headline, subline) {
         : "";
 
     const idx = nonEmptyParagraphs(frame.parentStory);
-    if (!idx.length) throw new Error(FRAME_NAMES.text + " is empty — re-run Prepare (step 1)");
+    if (!idx.length) throw new Error(FRAME_NAMES.text + " is empty — re-run Prepare (step 2)");
 
     try {
         writeParagraph(doc, frame, idx[0], headline, "headline");
@@ -958,7 +958,7 @@ async function inspectTemplates(templatePaths) {
     }
     if (problems.length) {
         throw new Error(
-            "Template check failed — select the <name>_DataMerge.indd files made by step 1 (Prepare):\n  " +
+            "Template check failed — select the <name>_DataMerge.indd files made by step 2 (Prepare):\n  " +
             problems.join("\n  ")
         );
     }
@@ -1037,7 +1037,7 @@ function inddPathFor(rec, templatePath, outputRootPath) {
 // placed image before saving.
 async function generateIndds(manifestRows, templatePaths, outputRootPath, onProgress) {
     if (!templatePaths || !templatePaths.length) {
-        throw new Error("No templates — prepare the client template in step 1 first.");
+        throw new Error("No templates — prepare the client template in step 2 first.");
     }
     const templates = await inspectTemplates(templatePaths);
     const root = outputRootPath.replace(/\/+$/, "");
