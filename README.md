@@ -103,7 +103,7 @@ One file per template type: one DANIS and one Service.
 | `DANIS + SERVICE HEADLINE +PRODUCT NAMING` | Yes | Headline; rows with an empty headline are skipped |
 | `DANIS SUBLINE` | Yes | Second paragraph in DANIS templates |
 | `SERVICE SUBLINE` | Yes | Second paragraph in Service templates |
-| `PICTURE NAME` | Required for step 1 | Image file name (without extension), used for exact image matching |
+| `PICTURE NAME` | Required for Prepare (step 2) | Image file name (without extension), used for exact image matching |
 | `DANIS ADD ON` | Optional | DANIS footer copy; if empty, no footer version is produced |
 | `YEAR` | Optional | Used in output file names; defaults to the current year |
 
@@ -124,7 +124,7 @@ Pictures/
 Image matching rules, in order:
 
 1. **Exact file-name match:** search the whole folder tree for an image whose name (without extension, case-insensitive) equals `PICTURE NAME`.
-2. **Fuzzy headline match** (if step 1 finds nothing): compare the headline with each subfolder name (with any leading `01_` number and part number removed). A similarity of at least 0.6 counts as a match. Inside the matched folder, `*(web_1080p).jpeg` is preferred; otherwise the first image found is used.
+2. **Fuzzy headline match** (if rule 1 finds nothing): compare the headline with each subfolder name (with any leading `01_` number and part number removed). A similarity of at least 0.6 counts as a match. Inside the matched folder, `*(web_1080p).jpeg` is preferred; otherwise the first image found is used.
 3. Supported extensions: `.jpg .jpeg .png .tif .tiff`. Screenshots (file names containing `Bildschirmfoto`) and hidden files are ignored.
 
 ---
@@ -133,82 +133,85 @@ Image matching rules, in order:
 
 The panel has four steps. Step 4 (Export) is pinned to the bottom of the panel so it is always visible.
 
-Selections (Excel, photos, template set, output folder) and product statuses are remembered when the panel is closed and reopened. **⟳ Reload** (top right) resets the panel to a clean start; it never deletes files on disk.
+Selections (Excel, photos, output folder, template set) and product statuses are remembered when the panel is closed and reopened. **⟳ Reload** (top left) resets the panel to a clean start; it never deletes files on disk.
 
-### Step 1: Turn a client template into a Data Merge template
+### Step 1: Inputs
+
+- **Select Excel File…**: pick the Excel copy sheet (`.xlsx`). The same file is used to prepare the template (step 2) and to match products (step 3).
+- **Select Photos Folder…**: pick the top-level product photo folder.
+- **Select Output Folder…**: choose where the `.indd` files, previews and final JPGs go (see [Output](#output)).
+
+### Step 2: Template
 
 1. **Open** the client template in InDesign (e.g. `DANIS_Template.indd`) and make it the active document.
-2. Click **Select Excel / CSV…** and pick the Excel copy sheet (CSV/TXT also work).
-3. Click **Prepare Copy of Current Document**.
+2. Click **Prepare Copy of Current Document** (needs the Excel file from step 1).
 
 The plugin then:
 
 - Saves a copy next to the client file as **`<original name>_DataMerge.indd`** (or `_DataMerge_2`, `_3`… if that name exists). **The client's original file is never modified.**
-- If an Excel file was picked, writes `<Excel name>_DataMerge.csv` next to it (Data Merge can only read CSV).
+- Writes `<Excel name>_DataMerge.csv` next to the Excel file (Data Merge can only read CSV).
 - Replaces the headline, subline, footer and image with Data Merge placeholders and names the frames `<<Headline>>` / `<<Footer>>` / `<<MainImage>>`. The client's styles and layout are kept.
 - Shows one line per page: `✓ Page 1` means success; `⚠ Page 2` lists the problem underneath.
 
-The prepared copy becomes the **Template Set** shown in step 3. The panel works with **one template set at a time**, which decides whether the run produces DANIS or Service files. To switch type, run step 1 on the other client template; it replaces the current template set.
+The prepared copy becomes the **Template Set** shown under the button. The panel works with **one template set at a time**, which decides whether the run produces DANIS or Service files. To switch type, open the other client template and prepare it; it replaces the current template set.
 
-> Tip: if you pick the photo folder in step 2 *before* running step 1, the generated CSV includes image paths (`@MainImage`), which makes previewing in InDesign's Data Merge panel easier. It is not required.
-
-### Step 2: Select inputs
-
-- **Select Excel File…**: pick the same Excel copy sheet.
-- **Select Photos Folder…**: pick the top-level product photo folder.
+> Tip: if the photo folder is already selected in step 1, the generated CSV includes image paths (`@MainImage`), which makes previewing in InDesign's Data Merge panel easier. It is not required.
 
 ### Step 3: Match, Generate & Review
 
-**Match.** Click **Match**. The table lists every Excel row and every photo folder:
+**Match.** Click **Match**. Every Excel row and every photo folder is listed as one block:
 
-| Column | Meaning |
-|---|---|
-| Product | Headline from Excel |
-| Match | ✓ image found (hover for file name and score) · ✗ skipped (hover for the reason) |
-| INDD | **Open** once the product's INDD exists; *Existing* = found on disk from an earlier session |
-| Status | See the status table below |
-| Actions | **Preview** · **Commit** · **⋯** (more) |
+```
+Ski- und Snowboardhalter                          ⚠ Review
+Image: Q5_as_2025_7840 (web_2160p).jpeg
+⚠ danis_up 1200x1200: headline/subline doesn't fit its frame
+[Open .indd] [Preview Image Batch] [Commit .indd] [⋯]
+```
 
-The line above the table summarises the match, e.g. `10 rows · 10 matched · 3 existing INDDs found`. If a match is wrong, fix `PICTURE NAME` in Excel or the folder name, then click Match again.
+- **First line:** the product (Excel headline) and its status (see the table below).
+- **Details:** the matched image; for a skipped row, why no image was found; any warnings (amber, up to 3; the rest are in the log) and errors (red); when it was committed or exported.
+- **Buttons:** the product's actions. They wrap onto a second line in a narrow panel.
 
-**Generate.** Click **Select Output Folder…**, then **Generate All**. This builds **one INDD per matched product** into `InDesign/<DANIS|Service>/` in the output folder. **No JPGs are exported yet.**
+The line above the list summarises the match, e.g. `10 rows · 10 matched · 3 existing INDDs found`. If a match is wrong, fix `PICTURE NAME` in Excel or the folder name, then click **Match** again.
+
+**Generate.** Click **Generate All .indd**. This builds **one `.indd` per matched product** into `InDesign/<DANIS|Service>/` in the output folder. **No JPGs are exported yet.**
 
 - Before anything is generated, the template set is checked (frames present, page sizes valid). If something is wrong, it stops with a list of problems and writes no files.
-- Each page of each INDD is checked after populating: an empty image frame or text that doesn't fit its frame marks the product **⚠ Review**.
-- If INDDs already exist, Generate All asks first: it **replaces** them, including any manual edits. To rebuild a single product, use its **⋯ → Regenerate INDD** instead.
-- An INDD that is open in InDesign is never replaced; close it and generate again.
+- Each page of each `.indd` is checked after populating: an empty image frame or text that doesn't fit its frame marks the product **⚠ Review**.
+- If `.indd` files already exist, Generate All .indd asks first: it **replaces** them, including any manual edits. To rebuild a single product, use its **⋯ → Regenerate .indd** instead.
+- An `.indd` that is open in InDesign is never replaced; close it and generate again.
 
 **Review.** Work through the products that need attention:
 
-- **Open** opens the product's INDD in InDesign. Edit it as needed. While a product INDD is the front document, its row is highlighted and its actions also appear in the bottom bar (*Working in: …*).
-- **Preview** exports low-resolution JPGs of that product into `preview/<type>/<product>/` and opens the folder. Previewing again overwrites the old preview. Preview also re-checks the INDD.
-- **⋯** offers **Regenerate INDD** (rebuilds this product from the template, discards manual edits, then opens it) and **Open Output Folder**.
+- **Open .indd** opens the product's `.indd` in InDesign. Edit it as needed. While a product `.indd` is the front document, its block is highlighted and its actions also appear in the bottom bar (*Working in: …*).
+- **Preview Image Batch** exports low-resolution JPGs of every page of that product into `preview/<type>/<product>/` and opens the folder. Previewing again overwrites the old preview. It also re-checks the `.indd`.
+- **⋯** offers **Regenerate .indd** (rebuilds this product from the template, discards manual edits, then opens it) and **Open Output Folder**.
 
-**Commit.** When a product is right, click its **Commit**: the INDD is saved (including edits made while it is open), checked again and marked **✓ Committed**. Commit exports no JPGs.
+**Commit.** When a product is right, click its **Commit .indd**: the `.indd` is saved (including edits made while it is open), checked again and marked **✓ Committed**. Commit exports no JPGs.
 
 - A product with warnings is not committed silently: the panel lists the warnings and asks **Commit Anyway?**
-- **Commit All Ready** commits every **✓ Ready** product in one go. Products with warnings are skipped and marked **⚠ Review**.
+- **Commit All Ready .indd** commits every **✓ Ready** product in one go. Products with warnings are skipped and marked **⚠ Review**.
 
 **Statuses**
 
 | Status | Meaning |
 |---|---|
-| Not generated | No INDD yet for this product |
-| Unchecked | An INDD exists on disk but hasn't been checked in this panel (e.g. made in an earlier session). Not treated as Ready: Preview or Commit it |
+| Not generated | No `.indd` yet for this product |
+| Unchecked | An `.indd` exists on disk but hasn't been checked in this panel (e.g. made in an earlier session). Not treated as Ready: preview or commit it |
 | ✓ Ready | Generated/checked, no warnings |
-| ⚠ Review | Warnings found (empty image frame, text that doesn't fit). Hover for details. Fix the INDD, then Preview or Commit |
+| ⚠ Review | Warnings found (empty image frame, text that doesn't fit); they are listed under the product. Fix the `.indd`, then preview or commit it |
 | ✓ Committed | Approved; will be exported in step 4 |
 | ✓ Exported | Final JPGs exist. Commit again after editing to re-queue it for export |
-| Failed | Generation failed. Hover for the error |
+| Failed | Generation failed; the error is listed under the product |
 | No asset | No image matched this row |
 
-The counts below the table (e.g. `6 Ready · 2 Need Review · 2 Committed`) show where the batch stands.
+The counts below the list (e.g. `6 Ready · 2 Need Review · 2 Committed`) show where the batch stands.
 
 ### Step 4: Export
 
-Click **Export All Committed**. The final JPGs of every **✓ Committed** product are exported from its INDD (so manual edits are included) into `output/<type>/<WxH>/`, and the product becomes **✓ Exported**. Nothing is skipped for warnings here; that decision was made at Commit.
+Click **Export All Committed Images**. The final JPGs of every **✓ Committed** product are exported from its `.indd` (so manual edits are included) into `output/<type>/<WxH>/`, and the product becomes **✓ Exported**. Nothing is skipped for warnings here; that decision was made at Commit.
 
-To change a product after export: edit its INDD, **Commit** it again, then **Export All Committed**.
+To change a product after export: edit its `.indd`, click **Commit .indd** again, then **Export All Committed Images**.
 
 ---
 
@@ -216,14 +219,14 @@ To change a product after export: edit its INDD, **Commit** it again, then **Exp
 
 ```
 <output folder>/
-  generation_log.csv                 ← written by Generate All
-  export_log.csv                     ← written by Export All Committed
+  generation_log.csv                 ← written by Generate All .indd
+  export_log.csv                     ← written by Export All Committed Images
   InDesign/
     DANIS/    DANIS_Herbst_<year>_<product>.indd
     Service/  Service_Herbst_<year>_<product>.indd
-  preview/                           ← low-res Preview JPGs (36 dpi), overwritten on each Preview
+  preview/                           ← low-res JPGs from Preview Image Batch (36 dpi), overwritten each time
     <DANIS|Service>/<product>/…
-  output/                            ← final JPGs (Export All Committed)
+  output/                            ← final JPGs (Export All Committed Images)
     DANIS/
       1200x1200/  DANIS_Herbst_<year>_<product>_1200x1200_up.jpg
                   DANIS_Herbst_<year>_<product>_1200x1200_bottom.jpg
@@ -259,12 +262,12 @@ Log columns: `timestamp, headline, page_label, output_file, status, message`. `s
 | "… has no file on disk" | The active document has never been saved. Press Cmd+S first. |
 | "Data source is missing column(s)" | An Excel header name is wrong, or the `PICTURE NAME` column is missing. |
 | "Sheet "AOZ+AOT" not found" | The sheet must be named exactly `AOZ+AOT`. |
-| "this INDD is open in InDesign" | Generate / Regenerate never replaces an open INDD. Close it in InDesign and try again. |
-| Generate All is greyed out | Needs at least 1 matched row, an output folder and a template set (step 1). |
-| Commit All Ready is greyed out | No product is ✓ Ready. Products in ⚠ Review must be committed one by one (Commit → Commit Anyway). |
-| Export All Committed is greyed out | No product is ✓ Committed yet. |
-| A product shows *Unchecked* | Its INDD is from an earlier session. Preview or Commit it to check it. |
-| Wrong type generated (DANIS instead of Service) | The template set holds one template; run step 1 on the other client template to switch. |
+| "this INDD is open in InDesign" | Generate / Regenerate never replaces an open `.indd`. Close it in InDesign and try again. |
+| Generate All .indd is greyed out | Needs at least 1 matched row, an output folder (step 1) and a template set (step 2). |
+| Commit All Ready .indd is greyed out | No product is ✓ Ready. Products in ⚠ Review must be committed one by one (Commit .indd → Commit Anyway). |
+| Export All Committed Images is greyed out | No product is ✓ Committed yet. |
+| A product shows *Unchecked* | Its `.indd` is from an earlier session. Preview or commit it to check it. |
+| Wrong type generated (DANIS instead of Service) | The template set holds one template; prepare the other client template (step 2) to switch. |
 
 ---
 
