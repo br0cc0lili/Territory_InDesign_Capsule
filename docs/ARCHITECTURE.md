@@ -18,7 +18,6 @@ This document is for developers working on `plugin/`. It covers the tech stack, 
 10. [Design principles](#10-design-principles)
 11. [Extension guide](#11-extension-guide)
 12. [Known issues and tech debt](#12-known-issues-and-tech-debt)
-13. [Legacy pipeline (`system/`)](#13-legacy-pipeline-system)
 
 ---
 
@@ -412,7 +411,7 @@ Key points:
 
 ### 7.2 Match (`matcher.js`)
 
-`matcher.js` is a JS port of the legacy `system/scripts/01_build_manifest.py` with the same rules, including a line-for-line port of `difflib.SequenceMatcher.ratio()`.
+`matcher.js` started as a JS port of the earlier Python prototype (`01_build_manifest.py`, since removed from the repo; it is still in the git history) with the same rules, including a line-for-line port of `difflib.SequenceMatcher.ratio()`.
 
 ```mermaid
 flowchart TD
@@ -648,15 +647,4 @@ Principles that recur throughout the code:
 - **Temporary diagnostics still on:** `TEXT_DIAGNOSTICS = true` writes large text snapshots to the generation log; `debugModuleShape()` is also temporary.
 - **`merge.js` is unused:** there is no UI entry point for it.
 - **Inconsistent image fitting:** Prepare sets fill proportionally + centre on the frame; Generate prefers Content-Aware Fit.
-- **Outdated texts:** the font warning in `checkAudiFont()` points to the old `01_Assets/` path; the header comment of `index.js` still lists the old step order; `plugin/README.md` describes an earlier UI and old folder names and lists SheetJS as MIT. It should be removed in favour of the root README.
 - **Polling:** `pollActiveDocument()` runs every second for the whole panel session.
-
----
-
-## 13. Legacy pipeline (`system/`)
-
-The command-line version that preceded the plugin, kept for reference. It **does not run as-is**: scripts hard-code old paths (`02_System/`, `01_Assets/`, `/Users/wpp88766/...`), and the folder has since been renamed to `system/`. Its template contract (page labels such as `top_service` in `Poster_Master.indd`) and output naming also differ from the plugin.
-
-- **Python 3 + `openpyxl`:** `01_build_manifest.py` reads Excel, matches images and writes `manifest.csv`; matching uses the standard-library `difflib`.
-- **ExtendScript (`.jsx`, legacy InDesign scripting):** `02_generate_posters.jsx` reads the manifest and renders posters. Older one-off fix and verify scripts are in `scripts/_archive/`.
-- **Bash + AppleScript (`osascript`):** `run_batch.sh` runs both steps, telling InDesign 2026 to execute the `.jsx` via AppleScript.

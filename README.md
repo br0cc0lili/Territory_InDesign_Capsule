@@ -24,9 +24,9 @@ An Adobe InDesign UXP panel that combines a client's InDesign layout templates, 
 ## Repository layout
 
 ```
-plugin/      ← the InDesign UXP plugin (the tool in day-to-day use)
-system/      ← legacy command-line pipeline (Python + ExtendScript), kept for reference only
+plugin/      ← the InDesign UXP plugin
 docs/
+  USER_GUIDE.md     ← guide for designers who install the packaged .ccx (also as PDF)
   ARCHITECTURE.md   ← tech stack, architecture and extension guide
 ```
 
@@ -276,5 +276,3 @@ Log columns: `timestamp, headline, page_label, output_file, status, message`. `s
 The plugin is a plain-JavaScript UXP panel with no build step, no npm dependencies and no server. Load the `plugin/` folder directly with UXP Developer Tool.
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the tech stack, module structure, template contract, internal flow, InDesign DOM workarounds and an extension guide.
-
-The `system/` folder contains the earlier command-line version of this pipeline. It is kept for reference only and does not run as-is.

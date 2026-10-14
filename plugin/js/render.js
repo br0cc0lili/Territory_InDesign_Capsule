@@ -166,8 +166,8 @@ function checkAudiFont() {
         if (status !== "INSTALLED") {
             return {
                 ok: false,
-                message: `Audi Type font not installed (status=${status}) — install from ` +
-                    "01_Assets/_CI Assets/Audi-CI-Guide/ before rendering.",
+                message: `Audi Type font not installed (status=${status}) — install ` +
+                    "Audi Type Extended Bold, then reopen this panel.",
             };
         }
         return { ok: true, message: "" };
@@ -179,7 +179,7 @@ function checkAudiFont() {
     }
 }
 
-// ---------- helpers (ported 1:1 from 02_generate_posters.jsx) ----------
+// ---------- helpers ----------
 
 // Product token used in BOTH JPG and INDD file names (one rule, no
 // per-example tweaks):
