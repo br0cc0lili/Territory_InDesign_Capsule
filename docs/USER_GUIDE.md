@@ -30,6 +30,8 @@ This guide is for designers who received the plugin as a **`.ccx` file**. You do
 
 ## Install the plugin
 
+> For a fully detailed walkthrough, including loading the plugin folder with the UXP Developer Tool, see the **[Installation Guide](INSTALL_GUIDE.md)**.
+
 1. **Quit InDesign** if it's open.
 2. **Double-click** the `.ccx` file. The Creative Cloud desktop app opens.
 3. Creative Cloud warns that the plugin doesn't come from Adobe's marketplace. That's expected for an in-house tool: click **Install** (or **OK**) to continue.

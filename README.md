@@ -26,7 +26,8 @@ An Adobe InDesign UXP panel that combines a client's InDesign layout templates, 
 ```
 plugin/      ← the InDesign UXP plugin
 docs/
-  USER_GUIDE.md     ← guide for designers who install the packaged .ccx (also as PDF)
+  INSTALL_GUIDE.md  ← step-by-step installation: .ccx or UXP Developer Tool (also as PDF)
+  USER_GUIDE.md     ← how to use the panel, for designers (also as PDF)
   ARCHITECTURE.md   ← tech stack, architecture and extension guide
 ```
 
