@@ -1,11 +1,12 @@
-// matcher.js — JS port of 02_System/scripts/01_build_manifest.py
+// matcher.js — matches each Excel row to a product photo.
 //
-// Reads the Excel sheet (via vendored SheetJS) and the picked photos folder,
-// fuzzy-matches each headline row to a product photo folder, and returns an
-// in-memory array of manifest rows — the panel's equivalent of manifest.csv.
+// Reads the Excel sheet (via vendored SheetJS) and the picked photos folder:
+// exact PICTURE NAME match first, otherwise fuzzy-matches the headline to a
+// product photo folder. Returns an in-memory array of manifest rows.
 //
-// Faithful port: same normalize(), same containment(0.95)/SequenceMatcher-ratio(>=0.6)
-// matching, same image preference/exclusion rules, same folder-name stripping.
+// Matching rules: normalize(), containment (0.95) / SequenceMatcher ratio
+// (>= 0.6), image preference / exclusion rules, folder-name stripping —
+// originally ported from the Python prototype (see git history).
 // Read-only against the picked Excel file / photos folder — never writes to them.
 
 /* global require, XLSX */

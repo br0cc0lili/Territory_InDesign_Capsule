@@ -3,12 +3,12 @@
 // template) and render.js (generate the product INDDs, export JPGs from
 // them), entirely in-panel.
 //
-// Workflow: 1 Prepare template → 2 Select inputs → 3 Match, Generate &
-// Review: Generate All builds one INDD per product (no JPGs); each product
-// row can be opened, previewed (low-res JPGs) and committed (final JPGs)
-// individually; Commit (one / "Commit All Ready") saves + checks INDDs and
-// marks them Committed without exporting; step 4 "Export All Committed"
-// exports the final JPGs of every Committed product.
+// Workflow: 1 Inputs (Excel, photos, output folder) → 2 Template (Prepare)
+// → 3 Match, Generate & Review: "Generate All .indd" builds one INDD per
+// product (no JPGs); each product can be opened, previewed (low-res JPGs)
+// and committed individually; Commit (one / "Commit All Ready .indd") saves
+// + checks INDDs and marks them Committed without exporting → 4 "Export All
+// Committed Images" exports the final JPGs of every Committed product.
 // MASS GENERATION + INDIVIDUAL EXCEPTION HANDLING.
 
 /* global require, document, localStorage, location */
