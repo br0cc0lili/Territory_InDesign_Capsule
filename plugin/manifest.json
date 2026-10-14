@@ -1,7 +1,7 @@
 {
     "id": "com.bertelsmann.posterbatch",
     "name": "Poster Batch Generator",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "main": "index.html",
     "manifestVersion": 5,
     "host": {
