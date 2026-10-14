@@ -1,1 +1,3 @@
 .DS_Store
+# Packaged plugin builds (.ccx)
+dist/
