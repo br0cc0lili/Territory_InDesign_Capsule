@@ -389,3 +389,65 @@ tr.row-active td {
 #footer-bar .progress-label {
     margin-top: 8px;
 }
+
+/* ---------- product list (step 3) ---------- */
+/* One block per product instead of a 5-column table, so it fits a narrow
+   panel: name + status, visible details, then wrapping action buttons. */
+
+.product-list {
+    margin-top: 10px;
+}
+
+.product-row {
+    padding: 8px 6px;
+    border-bottom: 1px solid #4a4a4a;
+}
+
+.product-row.row-active {
+    background: #3a3f4a;
+}
+
+.product-row.row-skipped .product-name {
+    color: #888;
+    font-style: italic;
+}
+
+.product-head {
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: space-between;
+}
+
+.product-name {
+    flex: 1;
+    min-width: 0;
+    font-weight: bold;
+    margin-right: 8px;
+}
+
+.product-status {
+    flex-shrink: 0;
+    font-size: 11px;
+}
+
+.product-detail {
+    font-size: 11px;
+    margin-top: 2px;
+    word-break: break-word;
+}
+
+.detail-muted { color: #9a9a9a; }
+.detail-warning { color: #ffd479; }
+.detail-error { color: #ffb3b3; }
+
+.product-actions {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    margin-top: 6px;
+}
+
+.product-actions button {
+    margin: 0 6px 4px 0;
+}

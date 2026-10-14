@@ -14,62 +14,44 @@
     <div id="font-banner" class="banner banner-hidden"></div>
 
     <section class="step">
-        <h2>1. Prepare client template for Data Merge</h2>
-        <div class="picker">
-            <button id="btn-dm-csv">Select Excel / CSV…</button>
-            <span id="dm-csv-path" class="path-label">No file selected</span>
-        </div>
-
-        <button id="btn-dm-prepare" disabled>Prepare Copy of Current Document</button>
-        <div id="dm-summary" class="summary"></div>
-    </section>
-    <section class="step">
-        <h2>2. Select inputs</h2>
+        <h2>1. Inputs</h2>
         <div class="picker">
             <button id="btn-excel">Select Excel File…</button>
             <span id="excel-path" class="path-label">No file selected</span>
         </div>
-
         <div class="picker">
             <button id="btn-photos">Select Photos Folder…</button>
             <span id="photos-path" class="path-label">No folder selected</span>
         </div>
+        <div class="picker">
+            <button id="btn-output">Select Output Folder…</button>
+            <span id="output-path" class="path-label">No folder selected</span>
+        </div>
     </section>
-
+    <section class="step">
+        <h2>2. Template</h2>
+        <button id="btn-dm-prepare" disabled>Prepare Copy of Current Document</button>
+        <div class="path-line"><span class="path-caption">Template Set:</span> <span id="template-list" class="path-label">None yet — open the client template and prepare it</span></div>
+        <div id="dm-summary" class="summary"></div>
+    </section>
     <section class="step step-last">
         <h2>3. Match, Generate &amp; Review</h2>
         <div class="actions">
             <button id="btn-match" disabled>Match</button>
-            <button id="btn-output">Select Output Folder…</button>
-            <button id="btn-generate" disabled>Generate All</button>
+            <button id="btn-generate" disabled>Generate All .indd</button>
         </div>
-        <!-- Step 3 progress, right under Match / Select Output Folder / Generate All:
-             only while Generate / Regenerate / Commit runs. -->
+        <!-- Step 3 progress: only while Generate / Regenerate / Commit runs. -->
         <div id="gen-progress" class="progress-hidden">
             <div id="gen-progress-label" class="progress-label"></div>
             <div class="progress-bar"><div id="gen-progress-fill" class="progress-fill"></div></div>
         </div>
         <div id="gen-message" class="run-message"></div>
-        <div class="path-line"><span class="path-caption">Template Set:</span> <span id="template-list" class="path-label">None yet — prepare one in step 1</span></div>
-        <div class="path-line"><span class="path-caption">Output:</span> <span id="output-path" class="path-label">No folder selected</span></div>
         <div id="match-summary" class="summary"></div>
-        <div class="table-wrap">
-            <table id="results">
-                <thead>
-                    <tr>
-                        <th>Product</th>
-                        <th>Match</th>
-                        <th>INDD</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
-        </div>
+        <!-- One block per product: name + status, details, actions. -->
+        <div id="results" class="product-list"></div>
         <div class="batch-bar">
             <span id="status-counts" class="status-counts"></span>
-            <button id="btn-commit-all" disabled>Commit All Ready</button>
+            <button id="btn-commit-all" disabled>Commit All Ready .indd</button>
         </div>
     </section>
     </div>
@@ -83,7 +65,7 @@
         </div>
         <div class="export-row">
             <h2>4. Export</h2>
-            <button id="btn-export" disabled>Export All Committed</button>
+            <button id="btn-export" disabled>Export All Committed Images</button>
         </div>
         <!-- Export progress: only while exporting / previewing. -->
         <div id="progress" class="progress-hidden">
