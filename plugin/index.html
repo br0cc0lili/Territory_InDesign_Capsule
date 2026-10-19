@@ -51,7 +51,10 @@
         <div id="results" class="product-list"></div>
         <div class="batch-bar">
             <span id="status-counts" class="status-counts"></span>
-            <button id="btn-commit-all" disabled>Commit All Ready .indd</button>
+            <div class="batch-buttons">
+                <button id="btn-extend-all" disabled title="Extend every product whose image doesn't cover its frame (one Firefly generation per product)">Extend All Images</button>
+                <button id="btn-commit-all" disabled>Commit All Ready .indd</button>
+            </div>
         </div>
     </section>
     </div>
@@ -75,12 +78,17 @@
         <div id="export-message" class="run-message"></div>
     </div>
 
-    <!-- Shared modal: the ⋯ More menu and confirmations. -->
+    <!-- Modal TEMPLATE: the ⋯ More menu, confirmations, Image extension.
+         showDialog() shows a fresh copy each time (never this element). -->
     <dialog id="action-dialog">
         <form method="dialog" class="dialog-body">
-            <h3 id="dialog-title"></h3>
-            <p id="dialog-message" class="dialog-message"></p>
-            <div id="dialog-buttons" class="dialog-buttons"></div>
+            <h3 class="dialog-title"></h3>
+            <p class="dialog-message"></p>
+            <div class="dialog-input">
+                <div class="dialog-input-label"></div>
+                <textarea class="dialog-input-text" rows="3" maxlength="1024"></textarea>
+            </div>
+            <div class="dialog-buttons"></div>
         </form>
     </dialog>
 

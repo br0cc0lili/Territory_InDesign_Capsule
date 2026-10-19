@@ -1,3 +1,17 @@
 .DS_Store
 # Packaged plugin builds (.ccx)
 dist/
+# Image Extension backend connection (contains the plugin key)
+plugin/backend.config.json
+# Local environment / App Builder workspace bindings, anywhere
+**/.env
+**/.aio/
+**/.aio
+# Dependencies anywhere
+**/node_modules/
+# Test output (generated fixtures, Firefly results, logs)
+tools/test-output/
+# Local InDesign test fixture paths (see tools/tests/indesign/config.example.json)
+tools/tests/indesign/config.local.json
+# InDesign lock files
+*.idlk

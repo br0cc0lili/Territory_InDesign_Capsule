@@ -1,0 +1,8 @@
+{
+    "enabled": true,
+    "baseUrl": "https://<your-namespace>.adobeio-static.net/api/v1/web/territory-app",
+    "pluginKey": "<same value as PLUGIN_SHARED_KEY in territory-app/.env — a prototype request gate, NOT a secret>",
+    "maxPlansPerRun": null,
+    "onlyPlanId": null,
+    "batchMode": "consistent"
+}

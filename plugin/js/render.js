@@ -285,6 +285,43 @@ function templateType() {
     throw new Error("Could not load templatetype.js (" + errors.join("; ") + ")");
 }
 
+// Image Extension (imageextension.js) — loaded the same defensive way: if it
+// can't load, image checks are skipped with a note, Generate still works.
+let _imageExt = null;
+function imageExt() {
+    if (_imageExt) return _imageExt;
+    const errors = [];
+    for (const path of ["./imageextension.js", "./js/imageextension.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.analyzeImageCoverage === "function") return (_imageExt = mod);
+            errors.push(`${path}: no analyzeImageCoverage`);
+        } catch (e) {
+            errors.push(`${path}: ${e}`);
+        }
+    }
+    throw new Error("Could not load imageextension.js (" + errors.join("; ") + ")");
+}
+
+// Placement stage (placement.js) — loaded the same way. Swappable: a
+// bounding-box placement system replaces this module; Image Extension never
+// calls it.
+let _placement = null;
+function placementModule() {
+    if (_placement) return _placement;
+    const errors = [];
+    for (const path of ["./placement.js", "./js/placement.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.getLayoutPolicy === "function") return (_placement = mod);
+            errors.push(`${path}: no getLayoutPolicy`);
+        } catch (e) {
+            errors.push(`${path}: ${e}`);
+        }
+    }
+    throw new Error("Could not load placement.js (" + errors.join("; ") + ")");
+}
+
 // Template type ("danis" -> output/DANIS + InDesign/DANIS, "service" ->
 // output/Service + InDesign/Service) from the template's file name, via the
 // rule shared with datamerge.js. Throws if the name has neither or both.
@@ -608,6 +645,83 @@ function placeImageFill(frame, imagePath) {
     }
 }
 
+// PLACEMENT stage for one page — the only place render.js decides where the
+// image goes. Uses the layout's placement policy (placement.js
+// PLACEMENT_CONFIG.layoutPolicies / defaultPolicy):
+//   "fill"   — placeImageFill() above, unchanged (covers the frame by
+//              enlarging/cropping)
+//   "extend" — Preserve Composition: whole image, aspect kept, no crop / no
+//              fill-zoom; any remaining strip is detected afterwards and
+//              handled by Image Extension.
+// If placement.js can't load, falls back to "fill".
+//   layout: pageLayout() result (subType, size, position, key)
+// Returns the placement contract Image Extension relies on:
+//   { mode, allowExtension, policy, note }
+// (a future bounding-box placement only has to return the same shape).
+function placeProductImage(frame, imagePath, layout) {
+    let placement = null;
+    try { placement = placementModule(); } catch (e) {
+        return { mode: "fill", allowExtension: false, policy: { id: "fallback", placementMode: "fill", anchor: null },
+            note: placeImageFill(frame, imagePath) + " (placement.js unavailable)" };
+    }
+    // Known layout → its configured policy; unknown layout → generic
+    // geometry-based fallback (needs the image's proportions: placed once).
+    let policy = placement.getLayoutPolicy(layout);
+    if (!policy.known) {
+        try {
+            policy = placement.resolvePlacementPolicy(layout, frame.geometricBounds, placement.probeSourceSize(frame, imagePath));
+        } catch (e) {
+            policy = Object.assign({}, policy, { id: "unknown (geometry unavailable — default policy)" });
+        }
+    }
+    if (policy.placementMode === "extend") {
+        return { mode: "extend", allowExtension: true, policy,
+            note: placement.placeImageForExtension(frame, imagePath, indesign(), policy).note };
+    }
+    return { mode: "fill", allowExtension: false, policy, note: placeImageFill(frame, imagePath) + ` (policy ${policy.id}` +
+        (policy.gap ? `; ${policy.gap.axis} gap ${Math.round(policy.gap.ratio * 100)}% > limit` : "") + ")" };
+}
+
+// The placement contract is stored on the Image frame, so a later Extend
+// Image on the saved INDD knows whether this page may be extended without
+// re-running (or knowing) placement. Script label only — nothing visible.
+const PLACEMENT_LABEL = "posterBatch.placement";
+
+function writePlacementLabel(frame, placed) {
+    try {
+        frame.insertLabel(PLACEMENT_LABEL, JSON.stringify({
+            mode: placed.mode, allowExtension: placed.allowExtension === true,
+            policy: placed.policy && placed.policy.id, anchor: (placed.policy && placed.policy.anchor) || null,
+            known: !!(placed.policy && placed.policy.known), gap: (placed.policy && placed.policy.gap) || null,
+        }));
+    } catch (e) {}
+}
+
+// The stored contract, or — for INDDs generated before it was stored — the
+// layout's current placement policy.
+function readPlacement(frame, layout) {
+    try {
+        const raw = frame.extractLabel(PLACEMENT_LABEL);
+        if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    try {
+        const placement = placementModule();
+        let policy = placement.getLayoutPolicy(layout);
+        if (!policy.known) {
+            // Unknown layout: same geometry fallback, from the placed graphic's proportions.
+            const graphics = frame.allGraphics;
+            const g = graphics && graphics.length ? itemAt(graphics, 0).geometricBounds : null;
+            if (g) {
+                policy = placement.resolvePlacementPolicy(layout, frame.geometricBounds,
+                    { width: Number(g[3]) - Number(g[1]), height: Number(g[2]) - Number(g[0]) });
+            }
+        }
+        return { mode: policy.placementMode, allowExtension: policy.placementMode === "extend", policy: policy.id, anchor: policy.anchor };
+    } catch (e) {
+        return { mode: "unknown", allowExtension: false, policy: "-", anchor: null };
+    }
+}
+
 // Final JPGs: 72 dpi (page points = output pixels). Preview JPGs use a lower
 // resolution — they only need to be looked at, not delivered.
 const FINAL_RESOLUTION = 72;
@@ -854,8 +968,10 @@ function populateDocument(doc, t, rec) {
             const footerDiag = footerFrame ? setFooterText(doc, footerFrame, rec.danis_addon || "") : "";
             const imageFrame = findImageFrame(page);
             if (!imageFrame) throw new Error(`no ${FRAME_NAMES.image} frame`);
-            const fitNote = placeImageFill(imageFrame, rec.imagePath);
-            pg.fitNote = fitNote;
+            const placed = placeProductImage(imageFrame, rec.imagePath, pg.layout);
+            pg.fitNote = placed.note;
+            pg.placement = placed;
+            writePlacementLabel(imageFrame, placed);
             if (TEXT_DIAGNOSTICS) {
                 reports.push(`${where} text: ${textDiag}${footerDiag ? " ### footer: " + footerDiag : ""}`);
             }
@@ -883,6 +999,73 @@ function populateDocument(doc, t, rec) {
     }
 
     return { plan, reports, errors };
+}
+
+// ---------- Image Extension (analysis during Generate) ----------
+
+// Runs analyzeImageCoverage() on every planned page's Image frame. Each page
+// resolves its own frame. Generate never calls Firefly and never changes
+// the INDD for Image Extension — the designer decides per product (Extend
+// Image in the panel). Cached generations of a plan are only looked up, so
+// the panel can offer "Use existing extension".
+// Returns { records: [...], warnings: ["WARNING page …: …"], summary }
+// summary.status: "not_required" | "extension_available" | "needs_review" |
+// "failed" (worst over all pages) — shown on the product in the panel.
+async function checkDocumentImages(doc, plan, ctx, registry, outputRoot) {
+    const records = [];
+    const warnings = [];
+    let ext;
+    try {
+        ext = imageExt();
+    } catch (e) {
+        return { records, warnings, summary: { status: "failed", text: "Image check unavailable: " + e.message } };
+    }
+    for (const pg of plan.pages) {
+        const page = doc.pages.item(pg.index);
+        // Image Extension gets the placement stage's decision as one neutral
+        // flag + an opaque description for the logs — nothing it would
+        // have to interpret.
+        const placed = pg.placement || { mode: "unknown", allowExtension: false, policy: {} };
+        const r = await ext.analyzeImageCoverage(findImageFrame(page), Object.assign({}, ctx, {
+            page: pg.index + 1, layout: `${pg.layout.key} ${pg.layout.size}`,
+            allowExtension: placed.allowExtension === true,
+            placement: { policy: placed.policy.id, mode: placed.mode, anchor: placed.policy.anchor || "-" },
+        }), registry);
+        records.push(r);
+    }
+    // Existing generations of each plan (no Firefly call).
+    for (const r of records) {
+        if (r.status !== "extension_required" || !outputRoot) continue;
+        try {
+            const cached = await ext.latestValidGeneration(outputRoot, r.plan.id);
+            if (cached) r.cachedVersion = cached.generationVersion;
+        } catch (e) {}
+    }
+    for (const r of records) {
+        try { console.log("[imageExtension] " + JSON.stringify(Object.assign({}, r, { snapshot: undefined }))); } catch (e) {}
+        if (r.status !== "not_required") {
+            warnings.push(`WARNING ${r.layout} (page ${r.page}): ${ext.describeCoverage(r)}`);
+        }
+    }
+    const rank = { not_required: 0, extension_required: 1, needs_review: 2, failed: 3 };
+    const worst = records.reduce((w, r) => (rank[r.status] > rank[w.status] ? r : w), { status: "not_required" });
+    const toExtend = records.filter((r) => r.status === "extension_required");
+    const plans = [];
+    for (const r of toExtend) {
+        if (!plans.some((p) => p.id === r.plan.id)) plans.push({ id: r.plan.id, cachedVersion: r.cachedVersion || null });
+    }
+    const summary = {
+        status: worst.status === "extension_required" ? "extension_available" : worst.status,
+        text: worst.status === "not_required" ? "Image covers its frame on every page"
+            : worst.status === "extension_required"
+                ? `Extension available — ${toExtend.length} page(s), ${plans.length} plan(s)` +
+                    (plans.some((p) => p.cachedVersion) ? " · existing extension on disk" : "")
+                : ext.describeCoverage(worst),
+        pages: records.filter((r) => r.status !== "not_required").length,
+        plans,
+    };
+    const report = records.map((r) => ext.formatCoverageReport(r)).join("\n\n");
+    return { records, warnings, summary, report };
 }
 
 // ---------- main render loop ----------
@@ -1019,8 +1202,9 @@ function inddPathFor(rec, templatePath, outputRootPath) {
 // outputRootPath: the selected root folder; INDDs go to InDesign/<type>/ in it
 // onProgress: optional callback(current, total, message)
 // Returns: { successCount, errorCount, logLines, failures: [{headline, label, message}],
-//            generated: [{rec, subType, inddPath, warnings: string[]}],
-//            failed: [{rec, subType, inddPath, error}] }
+//            generated: [{rec, subType, inddPath, warnings: string[], image}],
+//            failed: [{rec, subType, inddPath, error}],
+//            imageChecks: [ Image Extension record per page — see imageextension.js ] }
 //
 // Per product and template, on ONE working copy: open a fresh copy of the
 // template, populate every page (image, headline, subline, footer), detach
@@ -1050,6 +1234,12 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
 
     const generated = [];
     const failed = [];
+    const imageChecks = [];
+    const imageReports = [];
+    // One registry per run: identical extension plans (same source, anchor,
+    // expansion and working request) are shared — one Firefly call each.
+    let planRegistry = null;
+    try { planRegistry = imageExt().createPlanRegistry(); } catch (e) {}
     const usedIndd = new Set();
     for (const rec of matchedRows) {
         const headline = rec.headline;
@@ -1089,11 +1279,19 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                 if (result.errors.length) {
                     throw new Error("not saved — " + result.errors.join(" / "));
                 }
+                // Image Extension analysis: does each page's image cover its
+                // frame? Never fails the product and never calls Firefly:
+                // problems become Review warnings, extension is the
+                // designer's choice per product (Extend Image).
+                const image = await checkDocumentImages(doc, result.plan, { product: headline, indd: inddPath }, planRegistry, root);
+                imageChecks.push(...image.records);
+                if (image.report) imageReports.push(image.report);
+                for (const r of image.records) run.line(headline, `${t.name} image`, "", "info", JSON.stringify(r));
                 await saveWhenIdle(doc, inddPath);
-                const warnings = result.reports.filter((r) => /^WARNING /.test(r));
+                const warnings = result.reports.filter((r) => /^WARNING /.test(r)).concat(image.warnings);
                 run.success(headline, label, inddPath, "populated + validated" +
                     (warnings.length ? ` (${warnings.length} warning(s))` : ""));
-                generated.push({ rec, subType: t.subType, inddPath, warnings });
+                generated.push({ rec, subType: t.subType, inddPath, warnings, image: image.summary });
             } catch (e) {
                 // Nothing saved for this product + template.
                 fail(e);
@@ -1104,7 +1302,17 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
             run.tick(`${headline} — ${inddName}`);
         }
     }
-    return run.result({ generated, failed });
+    let imagePlanSummary = null;
+    let planText = "";
+    try {
+        imagePlanSummary = imageExt().summarizeExtensionPlans(imageChecks);
+        planText = imageExt().formatPlanSummary(imagePlanSummary);
+    } catch (e) {}
+    const divider = "\n\n" + "-".repeat(60) + "\n\n";
+    return run.result({
+        generated, failed, imageChecks, imagePlanSummary,
+        imageReport: ["EXTENSION PLANS PER PRODUCT", planText, "PER PAGE"].concat(imageReports).join(divider),
+    });
 }
 
 // ---------- export JPGs from the product INDDs (Preview / Commit) ----------
@@ -1172,18 +1380,73 @@ async function openIndd(path) {
     return app.open(path, true).name;
 }
 
-// What would make this page's JPG wrong: an empty image frame, or text that
-// doesn't fit its frame. Text is NOT compared with the Excel here — it may
-// have been edited on purpose in the INDD.
-function pageWarnings(page) {
+// What would make this page's JPG wrong: an empty image frame, an image
+// that doesn't cover its frame (original Image + any extendImage frames),
+// or text that doesn't fit its frame. Text is NOT compared with the Excel
+// here — it may have been edited on purpose in the INDD.
+//   imageStates: optional array — receives this page's coverage state
+//                ({ state, extension, … } from checkExtendedCoverage)
+function pageWarnings(page, imageStates) {
     const warnings = [];
     const imageFrame = findImageFrame(page);
-    if (!imageFrame || graphicInfo(imageFrame).count < 1) warnings.push("MainImage frame is empty");
+    if (!imageFrame || graphicInfo(imageFrame).count < 1) {
+        warnings.push("MainImage frame is empty");
+    } else {
+        // Image Extension (geometry only): coverage by the original image
+        // PLUS the generated extension frames on extendImage. An image moved
+        // by hand during review is caught here too.
+        try {
+            const ext = imageExt();
+            const c = ext.checkExtendedCoverage(page, imageFrame);
+            if (imageStates) imageStates.push(c);
+            if (c.state === "underfilled" && !c.extension) {
+                const found = ext.getPlacedGraphic(imageFrame);
+                const d = ext.detectImageUnderfill(imageFrame.geometricBounds, found.graphic.geometricBounds);
+                const where = Object.keys(d.missing).filter((k) => d.missing[k] > 0)
+                    .map((k) => `${k} ${d.missing[k]} pt`).join(", ");
+                warnings.push(`image doesn't cover its frame (${where})`);
+            } else if (c.state === "underfilled") {
+                warnings.push("image + extension don't cover its frame — re-extend");
+            } else if (c.state === "extension_hidden") {
+                warnings.push("image extension is hidden (extendImage layer off) — the JPG would show the uncovered strip");
+            } else if (c.state === "misaligned") {
+                warnings.push("image extension doesn't line up: " + c.text);
+            }
+        } catch (e) {}
+    }
     const headlineFrame = findHeadlineFrame(page);
     if (headlineFrame && oversets(headlineFrame)) warnings.push("headline/subline doesn't fit its frame");
     const footerFrame = findFooterFrame(page);
     if (footerFrame && oversets(footerFrame)) warnings.push("footer doesn't fit its frame");
     return warnings;
+}
+
+// Product-level Image status from the pages' coverage states (worst wins):
+//   misaligned → needs_review · underfilled → extension_available ·
+//   extension_hidden → extension_hidden · extended → extended ·
+//   covered → not_required. The panel keeps its own flavour of "extended"
+//   (cached / re-extended) from the action that applied it.
+function summarizeImageStates(states) {
+    const count = (fn) => states.filter(fn).length;
+    const ext = states.find((c) => c.extension);
+    const extension = ext ? ext.extension : null;
+    const notExtended = count((c) => c.state === "underfilled" && !c.extension);
+    const short = count((c) => c.state === "underfilled" && c.extension);
+    const rest = notExtended ? ` · ${notExtended} page(s) not extended yet` : "";
+    if (count((c) => c.state === "misaligned")) {
+        return { status: "needs_review", text: states.find((c) => c.state === "misaligned").text, extension };
+    }
+    // Hidden is reported first: it's a deliberate, reversible state the
+    // designer must notice before Commit.
+    if (count((c) => c.state === "extension_hidden")) return { status: "extension_hidden", text: "Extension hidden" + rest, extension };
+    if (short) return { status: "extension_available", text: `Image + extension don't cover the frame on ${short} page(s) — re-extend` + rest, extension };
+    if (notExtended) {
+        return { status: "extension_available", extension,
+            text: extension ? `Extended on ${count((c) => c.state === "extended")} page(s)` + rest + " — Extend Image"
+                : "Image doesn't cover its frame — extension available" };
+    }
+    if (count((c) => c.state === "extended")) return { status: "extended", text: "Extended", extension };
+    return { status: "not_required", text: "Image covers its frame on every page", extension: null };
 }
 
 // Preview JPGs of one product: <root>/preview/<DANIS|Service>/<product>/
@@ -1230,7 +1493,7 @@ async function exportFromIndds(items, outputRootPath, onProgress, options) {
         const { rec, subType, inddPath } = item;
         const headline = rec.headline;
         const label = basename(inddPath);
-        const outcome = { inddPath, exported: false, committed: false, warnings: [], error: "", folder: "" };
+        const outcome = { inddPath, exported: false, committed: false, warnings: [], error: "", folder: "", image: null };
         outcomes.push(outcome);
         let doc = null;
         let openedHere = false;
@@ -1247,11 +1510,13 @@ async function exportFromIndds(items, outputRootPath, onProgress, options) {
             if (plan.problems.length) throw new Error("INDD layouts don't match the output rules: " + plan.problems.join(" / "));
 
             // Check every page before exporting anything.
+            const imageStates = [];
             for (const pg of plan.pages) {
-                for (const w of pageWarnings(doc.pages.item(pg.index))) {
+                for (const w of pageWarnings(doc.pages.item(pg.index), imageStates)) {
                     outcome.warnings.push(`${pg.layout.key} ${pg.layout.size}: ${w}`);
                 }
             }
+            outcome.image = summarizeImageStates(imageStates);
             if (skipIfWarnings && outcome.warnings.length) {
                 run.line(headline, label, inddPath, "skipped", "needs review — " + outcome.warnings.join(" / "));
                 run.tick(`${headline} — needs review (skipped)`);
@@ -1305,6 +1570,258 @@ async function exportFromIndds(items, outputRootPath, onProgress, options) {
     return run.result({ items: outcomes });
 }
 
+// ---------- Image Extension: Extend / Re-extend / Show / Hide (panel) ----------
+
+// Opens a product INDD WITH a window (the designer compares the result in
+// InDesign) or brings it to the front. Returns the document.
+async function openForExtension(inddPath) {
+    const { app } = indesign();
+    if (!(await pathExists(inddPath))) throw new Error("INDD not found — generate it first");
+    let doc = findOpenDocument(inddPath);
+    if (doc) {
+        try { app.activeDocument = doc; } catch (e) {}
+    } else {
+        doc = app.open(inddPath, true);
+    }
+    usePoints(doc);
+    return doc;
+}
+
+// Every page's warnings + coverage state of an open product document.
+function checkProductPages(doc, plan) {
+    const warnings = [];
+    const states = [];
+    for (const pg of plan.pages) {
+        for (const w of pageWarnings(doc.pages.item(pg.index), states)) warnings.push(`${pg.layout.key} ${pg.layout.size}: ${w}`);
+    }
+    return { warnings, image: summarizeImageStates(states), states };
+}
+
+// Phase 3 + 4 for ONE product INDD, started by the designer in the panel.
+//   item: { rec, subType, inddPath }
+//   mode: "extend"       — Extend image: NEW Firefly generation(s)
+//         "regenerate"   — Re-extend image: NEW Firefly generation(s) — a new
+//                          batch version
+//         "use_existing" — Use existing extension: stored versions only, no Firefly
+// Batch mode (CONFIG.batchMode / backend.config.json "batchMode"):
+//   "consistent" (default) — ONE master generation for the product batch;
+//     every eligible page clips its strip from that same result. More than
+//     one master only when one is impossible (groupIntoMasterPlans).
+//   "independent" — one generation per page (deliberate API testing).
+// Stored versions are never reused automatically — only via "Use existing".
+// Bounded: generations happen only on a click, at most one per unit.
+// The ORIGINAL Image frames are only read. Generated content goes into
+// extension-only frames on the `extendImage` layer. The INDD is saved and
+// left open.
+//   options.prompt: optional designer text sent with every NEW generation
+// Returns { pages, generations, warnings, image, newGenerations, prompt, logLines }.
+//   options.background: open the INDD without a window and close it again
+//     after saving, if it wasn't open already (Extend All Images)
+async function extendProductImage(item, outputRootPath, mode, onProgress, options) {
+    const background = !!(options && options.background);
+    const wasOpen = !!findOpenDocument(item.inddPath);
+    let doc;
+    if (background && !wasOpen) {
+        if (!(await pathExists(item.inddPath))) throw new Error("INDD not found — generate it first");
+        doc = indesign().app.open(item.inddPath, false);
+        usePoints(doc);
+    } else {
+        doc = await openForExtension(item.inddPath);
+    }
+    try {
+        return await extendOpenProduct(doc, item, outputRootPath, mode, onProgress, options);
+    } finally {
+        if (background && !wasOpen) {
+            closeWithoutSaving(doc); // saved already when anything was applied
+            await settle(250);
+        }
+    }
+}
+
+async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, options) {
+    const prompt = mode === "use_existing" ? "" : String((options && options.prompt) || "").trim().slice(0, 1024);
+    const ext = imageExt();
+    const id = indesign();
+    const root = outputRootPath.replace(/\/+$/, "");
+    const headline = item.rec.headline;
+    let cfg = null;
+    const backend = await ext.loadBackendConfig();
+    if (mode !== "use_existing") {
+        if (!backend.config) throw new Error(backend.reason);
+        cfg = backend.config;
+    }
+    const plan = planPages(doc, item.subType);
+    if (plan.problems.length) throw new Error("INDD layouts don't match the output rules: " + plan.problems.join(" / "));
+
+    // 1. Analysis from the FINAL placed geometry, page by page.
+    const registry = ext.createPlanRegistry();
+    const pages = [];
+    for (const pg of plan.pages) {
+        const page = doc.pages.item(pg.index);
+        const frame = findImageFrame(page);
+        const placed = frame ? readPlacement(frame, pg.layout) : { allowExtension: false };
+        const r = await ext.analyzeImageCoverage(frame, {
+            product: headline, indd: item.inddPath, page: pg.index + 1, layout: `${pg.layout.key} ${pg.layout.size}`,
+            allowExtension: placed.allowExtension === true,
+            placement: { policy: placed.policy, mode: placed.mode, anchor: placed.anchor || "-" },
+        }, registry);
+        pages.push({ pg, record: r, plan: null, meta: null, cacheHit: false, applied: null, error: "" });
+    }
+
+    // 2. Generation units (one Firefly generation — or one stored version — each):
+    //    consistent batch (default): ONE master plan for all eligible pages of
+    //      this product, split only when a shared master is impossible;
+    //    independent: one unit per page.
+    const batchMode = (backend.config && backend.config.batchMode) || ext.CONFIG.batchMode;
+    const todo = pages.filter((p) => p.record.status === "extension_required");
+    for (const p of todo) p.plan = registry.get(p.record.plan.key).plan;
+    let eligible = todo;
+    if (cfg && cfg.onlyPlanId) {
+        // Test limiter: only pages whose own plan is onlyPlanId take part.
+        for (const p of todo) if (p.plan.id !== cfg.onlyPlanId) p.error = `skipped — test limit onlyPlanId = ${cfg.onlyPlanId}`;
+        eligible = todo.filter((p) => !p.error);
+    }
+    // Readable names for the stored generations — the SAME naming as the
+    // normal output (buildOutputFileName / buildInddFileName, productToken,
+    // uniqueName): one page → "<JPG name>_extended"; a master shared by
+    // several pages → "<product INDD name>_extension_master".
+    const rec = item.rec;
+    const usedNames = new Set();
+    const unique = (base) => uniqueName(base + ".x", usedNames).replace(/\.x$/, "");
+    const pageInfo = (p) => ({ layout: p.record.layout, page: p.record.page, size: p.pg.layout.size,
+        width: p.pg.layout.w, height: p.pg.layout.h, variant: p.pg.layout.position, planId: p.plan.id });
+    const naming = { templateType: item.subType, prefix: PROJECT_PREFIX[item.subType], year: rec.year, product: headline };
+    const usedForPages = (pages) => {
+        if (pages.length === 1) {
+            const pi = pageInfo(pages[0]);
+            return Object.assign({}, naming, {
+                layout: pi.layout, page: pi.page, width: pi.width, height: pi.height, variant: pi.variant, pages: [pi],
+                baseName: unique(buildOutputFileName(rec, pages[0].pg.layout).replace(/\.jpg$/i, "") + "_extended"),
+            });
+        }
+        return Object.assign({}, naming, {
+            layout: "batch", layouts: pages.map((p) => p.record.layout), pagePlans: pages.map((p) => p.plan.id), pages: pages.map(pageInfo),
+            baseName: unique(buildInddFileName(rec, item.subType).replace(/\.indd$/i, "") + "_extension_master"),
+        });
+    };
+    let units;
+    if (batchMode === "independent") {
+        units = eligible.map((p) => ({ plan: p.plan, pages: [p], usedFor: usedForPages([p]) }));
+    } else {
+        units = ext.groupIntoMasterPlans(eligible.map((p) => ({ plan: p.plan, graphicBounds: p.record.graphicBounds, ref: p })))
+            .map((g) => {
+                const pages = g.pages.map((x) => x.ref);
+                return { plan: g.master, pages, usedFor: usedForPages(pages) };
+            });
+    }
+    let newGenerations = 0;
+    let done = 0;
+    for (const u of units) {
+        const label = u.pages.length > 1 ? `${u.pages.length} pages` : u.pages[0].record.layout;
+        if (onProgress) onProgress(done, units.length, `${headline} — ${label}`);
+        let meta = null, cacheHit = false, error = "";
+        try {
+            if (cfg && cfg.maxPlansPerRun !== null && cfg.maxPlansPerRun !== undefined && newGenerations >= cfg.maxPlansPerRun) {
+                throw new Error(`skipped — test limit maxPlansPerRun = ${cfg.maxPlansPerRun}`);
+            }
+            if (mode !== "use_existing") newGenerations++;
+            const snapshots = {};
+            for (const p of u.pages) snapshots[p.record.layout] = p.record.snapshot;
+            const got = await ext.obtainExtension(cfg, root, u.plan, snapshots, mode, u.usedFor, { prompt });
+            meta = got.meta;
+            cacheHit = got.cacheHit;
+        } catch (e) {
+            error = String((e && e.message) || e);
+        }
+        for (const p of u.pages) { p.unitPlan = u.plan; p.meta = meta; p.cacheHit = cacheHit; p.error = error; }
+        done++;
+        if (onProgress) onProgress(done, units.length, `${headline} — ${label}`);
+    }
+
+    // Use existing: a page whose unit has no stored version of exactly that
+    // plan falls back to any stored generation that can serve it (metadata:
+    // same source, enough extension and resolution) — no Firefly.
+    if (mode === "use_existing") {
+        for (const p of todo) {
+            if (p.meta || !/no existing extension/.test(p.error || "")) continue;
+            try {
+                const g = await ext.applicableGenerationFor(root, p.plan, p.record.graphicBounds, { product: headline, layout: p.record.layout });
+                if (g) { p.meta = g; p.cacheHit = true; p.error = ""; }
+            } catch (e) {}
+        }
+    }
+
+    // 3. Each page clips ITS strip from its unit's (master) result on extendImage.
+    for (const p of todo) {
+        if (!p.meta) continue;
+        try {
+            const page = doc.pages.item(p.pg.index);
+            p.applied = ext.applyExtensionToPage(doc, page, findImageFrame(page), p.record, p.meta, p.cacheHit, id);
+            p.applied.cacheHit = p.cacheHit;
+        } catch (e) {
+            p.error = String((e && e.message) || e);
+        }
+    }
+
+    // 4. Re-validate the whole product (original + extension), then save.
+    const check = checkProductPages(doc, plan);
+    const appliedAny = pages.some((p) => p.applied);
+    if (appliedAny) await saveWhenIdle(doc);
+
+    const image = check.image;
+    if (image.status === "extended") {
+        image.status = mode === "regenerate" ? "re_extended" : mode === "use_existing" ? "extended_cached" : "extended";
+        image.text = { re_extended: "Re-extended", extended_cached: "Extended (existing)", extended: "Extended" }[image.status];
+    }
+    const failed = todo.filter((p) => p.error);
+    if (failed.length && image.status === "extension_available") {
+        image.text += ` (${failed.length} page(s) not extended — see the message / image_extension_apply_log.jsonl)`;
+    }
+    image.versions = todo.filter((p) => p.applied).map((p) => ({ layout: p.record.layout, planId: p.meta.planId, version: p.meta.generationVersion, cacheHit: p.cacheHit }));
+    image.plans = [];
+    for (const p of todo) {
+        if (!image.plans.some((x) => x.id === p.plan.id)) image.plans.push({ id: p.plan.id, cachedVersion: p.meta ? p.meta.generationVersion : null });
+    }
+
+    const logLines = pages.map((p) => JSON.stringify({
+        product: headline, layout: p.record.layout, page: p.record.page, status: p.record.status, mode, prompt,
+        plan: p.record.plan ? p.record.plan.id : null, generationPlan: p.meta ? p.meta.planId : null, batchMode, missing: p.record.missing,
+        version: p.meta ? p.meta.generationVersion : null, fireflyJobId: p.meta ? p.meta.fireflyJobId : null,
+        originalWorkingTarget: p.meta ? (p.meta.originalWorkingTarget || p.meta.fullResolutionTarget || null) : null,
+        fireflyWorkingTarget: p.meta ? p.meta.target : null, workingScale: p.meta ? p.meta.workingScale : null,
+        cacheHit: p.cacheHit, applied: p.applied, error: p.error || "",
+    }));
+    return {
+        pages: pages.map((p) => ({ layout: p.record.layout, status: p.record.status, applied: p.applied, error: p.error })),
+        generations: todo.map((p) => ({ layout: p.record.layout, planId: p.plan.id, generationPlan: p.meta ? p.meta.planId : null,
+            version: p.meta ? p.meta.generationVersion : null,
+            jobId: p.meta ? p.meta.fireflyJobId : null, cacheHit: p.cacheHit, asset: p.meta ? p.meta.generatedAssetPath : null, error: p.error })),
+        units: units.map((u) => ({ planId: u.plan.id, kind: u.plan.kind || "page", pages: u.pages.map((p) => p.record.layout), name: u.usedFor.baseName,
+            asset: u.pages[0].meta ? u.pages[0].meta.generatedAssetPath : null,
+            expansionPixels: u.plan.expansionPixels, working: u.plan.working, version: u.pages[0].meta ? u.pages[0].meta.generationVersion : null,
+            jobId: u.pages[0].meta ? u.pages[0].meta.fireflyJobId : null, error: u.pages[0].error })),
+        batchMode, warnings: check.warnings, image, newGenerations, prompt, saved: appliedAny, logLines,
+    };
+}
+
+// Show / Hide Extension: toggles the INDD's extendImage layer so the
+// designer can compare the untouched original layout with the extended one.
+// Saved only if the document had no other unsaved edits (so the panel's
+// status matches the file); otherwise left for Commit to save.
+// Returns { warnings, image, saved }.
+async function setExtensionVisible(item, visible) {
+    const ext = imageExt();
+    const doc = await openForExtension(item.inddPath);
+    let wasModified = true;
+    try { wasModified = !!doc.modified; } catch (e) {}
+    if (!ext.setExtendLayerVisible(doc, visible)) throw new Error("this INDD has no extendImage layer — extend the image first");
+    const plan = planPages(doc, item.subType);
+    const check = checkProductPages(doc, plan);
+    let saved = false;
+    if (!wasModified) { await saveWhenIdle(doc); saved = true; }
+    return { warnings: check.warnings, image: check.image, saved };
+}
+
 // "danis" / "service" for a prepared template path (same rule as Render).
 function typeOfTemplate(path) {
     return subTypeFromPath(path);
@@ -1319,6 +1836,6 @@ async function writeLog(logLines, logPath) {
 
 module.exports = {
     checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
-    isInddOpen, closeIndd, activeDocumentPath,
+    isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, writeLog, debugModuleShape,
 };
