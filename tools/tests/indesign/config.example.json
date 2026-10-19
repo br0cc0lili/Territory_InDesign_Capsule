@@ -1,0 +1,15 @@
+{
+    "_comment": "Copy to config.local.json (gitignored) and fill in YOUR local fixture paths. Tests only ever open copies of these files.",
+    "clientTemplate": "/absolute/path/to/SERVICE_Template 2.indd",
+    "preparedTemplate": "/absolute/path/to/SERVICE_Template 2_DataMerge_5.indd",
+    "sourceImage": "/absolute/path/to/a/product photo (web_2160p).jpeg",
+    "expectedClientSubline": "Audi Original Zubeh",
+    "twoLayoutPages": [5, 7],
+    "_notes": {
+        "clientTemplate": "An unprepared client Service template (subline as real text on its 'text' layer).",
+        "preparedTemplate": "The Prepare output of clientTemplate, in the SAME folder, still holding <<SERVICE SUBLINE>> placeholders.",
+        "sourceImage": "Any product photo; used as the placed image.",
+        "expectedClientSubline": "Start of the client's real subline on page 1 (checked after recovery).",
+        "twoLayoutPages": "1-based pages of preparedTemplate kept for the 2-layout fixture (e.g. 800x600 bottom + 250x250 thumbnail)."
+    }
+}

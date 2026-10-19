@@ -1,0 +1,20 @@
+const datamerge = require("../../../plugin/js/datamerge.js");
+const { SaveOptions } = require("indesign");
+const R = ROOT + "/stale";
+__out.prepare = {};
+for (const [client, csv] of [["WINTER_Client.indd", "winter.csv"], ["SERVICE_Client.indd", "nosubline.csv"]]) {
+    app.open(R + "/" + client, true);
+    try {
+        const res = await datamerge.prepareActiveDocument(R + "/" + csv);
+        __out.prepare[client] = { copy: res.copyPath.split("/").pop(), saved: res.saved,
+            page1: res.pages[0] && res.pages[0].notes.filter((n) => /subline/.test(n)), problems: res.pages.filter((p) => !p.ok).length };
+    } catch (e) { __out.prepare[client] = { error: String(e) }; }
+    // close only test files (client + prepared copy live in the test root) — never another document
+    await closeTestDocuments();
+}
+// the client's real subline (page 1) for comparison
+const { OpenOptions } = require("indesign");
+const c = app.open(CFG.clientTemplate, false, OpenOptions.OPEN_COPY);
+const items = itemsAt(c.pages.item(0).allPageItems).filter((it) => it.constructor.name === "TextFrame" && String(it.itemLayer.name).toLowerCase() === "text");
+__out.clientPage1Text = items.map((it) => String(it.parentStory.contents).replace(/\r/g, " | "));
+c.close(SaveOptions.NO);

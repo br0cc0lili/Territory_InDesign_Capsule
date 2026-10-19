@@ -1,0 +1,22 @@
+const R = ROOT + "/stale";
+const img = CFG.sourceImage;
+const H = "DANIS + SERVICE HEADLINE +PRODUCT NAMING";
+const rec = (cols, extra) => Object.assign({ status: "matched", headline: "Aerowischer", year: "2026", imagePath: img, danis_subline: "", service_subline: "", danis_addon: "",
+    columns: Object.assign({ [H]: "Aerowischer" }, cols) }, extra || {});
+const cases = [
+    ["1a old prepared <<SERVICE SUBLINE>> + no column (client INDD available)", R + "/SERVICE_Old_DataMerge.indd", rec({})],
+    ["1b old prepared <<SERVICE SUBLINE>> + no column (no client INDD)", ROOT + "/SERVICE_Template_two_layouts_DataMerge.indd", rec({})],
+    ["2 generic <<WINTER SUBLINE>> + no WINTER SUBLINE column", R + "/WINTER_Client_DataMerge.indd", rec({})],
+    ["3 real template subline text + no column", R + "/SERVICE_Client_DataMerge.indd", rec({})],
+    ["4a WINTER SUBLINE column exists", R + "/WINTER_Client_DataMerge.indd", rec({ "WINTER SUBLINE": "Winter-Check" })],
+    ["4b SERVICE SUBLINE column exists", R + "/SERVICE_Old_DataMerge.indd", rec({ "SERVICE SUBLINE": "Audi Original Teile" }, { service_subline: "Audi Original Teile" })],
+];
+__out.cases = [];
+let n = 0;
+for (const [name, tpl, r] of cases) {
+    const g = await render.generateIndds([r], [tpl], R + "/gen" + (++n), null);
+    const sublines = [...new Set(g.logLines.filter((l) => /page \d+ ok:/.test(l)).map((l) => (l.match(/subline=("[^"]*")/) || [])[1]))];
+    __out.cases.push({ name, generated: g.generated.length, failed: g.failed.map((x) => x.error.slice(0, 200)),
+        sublines, tokenLeak: sublines.some((s) => /<</.test(s)),
+        nonImageWarnings: g.generated.flatMap((x) => x.warnings).filter((w) => !/Image doesn't cover/.test(w)) });
+}

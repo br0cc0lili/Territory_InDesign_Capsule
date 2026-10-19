@@ -175,7 +175,7 @@ function templateTypeOf(path) {
 function showContext() {
     if (templatePaths.length) {
         const t = templateTypeOf(templatePaths[0]);
-        const label = t && render ? render.TYPE_FOLDER[t] : "?";
+        const label = t && render ? render.typeFolder(t) : "?";
         el.templateList.textContent = `${label} (${templatePaths[0].split("/").pop()})`;
     } else {
         el.templateList.textContent = "None yet — open the client template and prepare it";
@@ -527,6 +527,16 @@ el.btnDmPrepare.addEventListener("click", async () => {
             return [`⚠ Page ${pg.page}`].concat(problems).join("\n");
         });
         if (!result.saved) pageLines.push("⚠ The template couldn't be saved — press Cmd+S in InDesign.");
+        // Layouts are discovered from the template itself — no fixed set.
+        if (result.saved && render) {
+            try {
+                const t = await render.detectTemplateLayouts(result.copyPath);
+                if (t.problems.length) pageLines.unshift("⚠ Template structure: " + t.problems.join("; "));
+                else pageLines.unshift(t.detected);
+            } catch (e) {
+                pageLines.push("Layouts not checked: " + errorText(e));
+            }
+        }
         el.dmSummary.textContent = pageLines.join("\n");
     } catch (e) {
         el.dmSummary.textContent = errorText(e);
@@ -922,7 +932,8 @@ el.btnGenerate.addEventListener("click", async () => {
             (result.failed.length ? ` · ✗ ${result.failed.length} failed` : "") +
             (toExtend ? ` · ↗ ${toExtend} product(s) can be extended — use Extend Image` : "") +
             (extendPages ? ` (${extendPages} page(s); one shared Firefly generation per product on Extend)` : "") +
-            " — logs: generation_log.csv, image_extension_log.txt / .json", result, channels.generate);
+            " — logs: generation_log.csv, image_extension_log.txt / .json", result, channels.generate,
+            (result.templates || []).map((t) => t.detected).join("\n"));
     } catch (e) {
         setMessage(errorText(e), channels.generate);
     }

@@ -1,0 +1,40 @@
+// Fixtures (in tools/test-output/phase4-root): a 2-page prepared Service
+// template WITHOUT its client INDD, copies of the real client template, and
+// Data Merge CSVs with / without a WINTER SUBLINE column.
+const { OpenOptions, SaveOptions } = require("indesign");
+await closeTestDocuments(); // fixtures left open by an earlier run (only files inside the test root)
+const lfs = uxp.storage.localFileSystem;
+async function ensureDir(p) { try { await lfs.getEntryWithUrl("file:" + p); } catch (e) { await lfs.createEntryWithUrl("file:" + p, { type: uxp.storage.types.folder }); } }
+await ensureDir(ROOT); await ensureDir(ROOT + "/stale");
+// "Old" prepared templates = made before Prepare stored the client's
+// original subline: the label is cleared, so only the stale-token logic
+// (client-INDD recovery / removal) can resolve <<SERVICE SUBLINE>>.
+function clearOriginalSublines(doc) {
+    for (const page of itemsAt(doc.pages)) for (const it of itemsAt(page.allPageItems)) {
+        try { if (String(it.name) === "<<Headline>>") it.insertLabel("posterBatch.originalSubline", ""); } catch (e) {}
+    }
+}
+// 1a: old prepared template WITH its client INDD next to it (recovery)
+// Opens a COPY, lets `edit` change it, saves it to `dest` — and always closes
+// the copy, even if the save fails (no stray Untitled documents).
+function copyTo(src, dest, edit) {
+    const doc = app.open(src, false, OpenOptions.OPEN_COPY);
+    try { if (edit) edit(doc); doc.save(dest); } finally { try { doc.close(SaveOptions.NO); } catch (e) {} }
+}
+copyTo(CFG.preparedTemplate, ROOT + "/stale/SERVICE_Old_DataMerge.indd", clearOriginalSublines);
+copyTo(CFG.clientTemplate, ROOT + "/stale/SERVICE_Old.indd");
+// 1b: old 2-layout prepared template WITHOUT a client INDD (token removed)
+const keep = CFG.twoLayoutPages.map((n) => n - 1);
+copyTo(CFG.preparedTemplate, ROOT + "/SERVICE_Template_two_layouts_DataMerge.indd", (d) => {
+    for (let i = d.pages.length - 1; i >= 0; i--) if (keep.indexOf(i) === -1) d.pages.item(i).remove();
+    clearOriginalSublines(d);
+});
+for (const name of ["WINTER_Client.indd", "SERVICE_Client.indd"]) copyTo(CFG.clientTemplate, ROOT + "/stale/" + name);
+const img = CFG.sourceImage;
+function utf16(text) { const b = new ArrayBuffer(2 + text.length * 2); const v = new DataView(b); v.setUint16(0, 0xfeff, true); for (let i = 0; i < text.length; i++) v.setUint16(2 + i * 2, text.charCodeAt(i), true); return b; }
+for (const [name, rows] of [["winter.csv", [["DANIS + SERVICE HEADLINE +PRODUCT NAMING", "WINTER SUBLINE", "@MainImage"], ["Aerowischer", "Winter-Check", img]]],
+    ["nosubline.csv", [["DANIS + SERVICE HEADLINE +PRODUCT NAMING", "@MainImage"], ["Aerowischer", img]]]]) {
+    const f = await lfs.createEntryWithUrl("file:" + ROOT + "/stale/" + name, { type: uxp.storage.types.file, overwrite: true });
+    await f.write(utf16(rows.map((r) => r.map((c) => /[",]/.test(c) ? `"${c}"` : c).join(",")).join("\r\n") + "\r\n"), { format: uxp.storage.formats.binary });
+}
+__out.ok = true;

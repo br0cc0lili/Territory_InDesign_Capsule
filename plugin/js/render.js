@@ -8,8 +8,9 @@
 //   <<Footer>>    : optional, whole text = DANIS ADD ON
 //   <<MainImage>> : product image
 // Pages need no labels: size comes from the page itself, DANIS vs Service
-// from the template's file name (same rule as datamerge.js). Which pages are
-// exported is fixed by the DANIS/Service output rules below; each product's
+// from the template's file name (same rule as datamerge.js). The layouts are
+// discovered from the template's own pages (planPages — no fixed inventory:
+// every page with the placeholders is generated and exported); each product's
 // populated document is saved once to InDesign/<type>/ and its JPGs are
 // exported to output/<type>/<WxH>/. Two steps: generateIndds() builds and
 // saves the populated INDDs; exportFromIndds() exports the JPGs from them
@@ -77,11 +78,9 @@ async function pathExists(path) {
 
 const AUDI_FONT_NAME = "Audi Type\tExtended Bold";
 
-// Output file name prefix per subline type.
-const PROJECT_PREFIX = {
-    danis: "DANIS_Herbst",
-    service: "Service_Herbst",
-};
+// Output file name prefix and folder per template type: templatetype.js
+// templateTypeInfo() — known types (DANIS_Herbst / Service_Herbst, DANIS /
+// Service), generic types use their own name for both.
 
 // Frame names written by datamerge.js's Prepare step.
 const FRAME_NAMES = { text: "<<Headline>>", footer: "<<Footer>>", image: "<<MainImage>>" };
@@ -89,37 +88,25 @@ const FRAME_NAMES = { text: "<<Headline>>", footer: "<<Footer>>", image: "<<Main
 // Folder names per template type, used under the selected output root:
 //   output/<DANIS|Service>/<WxH>/<…>.jpg       (exported JPGs)
 //   InDesign/<DANIS|Service>/<…>.indd           (one populated INDD per product)
-const TYPE_FOLDER = { danis: "DANIS", service: "Service" };
+const TYPE_FOLDER = { danis: "DANIS", service: "Service" }; // known types only — use typeFolder()
 
-// Output rules — the exact layouts each template must contain, per page
-// size. Every page must fill exactly one slot: a missing required layout, a
-// duplicate, an unexpected size or variant is a template error (no guessing).
+// Template layouts are DISCOVERED from the template itself (describePage /
+// planPages): every page with the placeholders is a layout, whatever its
+// size, and is generated + exported. There is no required inventory — a
+// DANIS template with one 1200x1200 page, a Service template with two
+// layouts or a new page size are all valid. Only structural problems are
+// errors (see describePage).
 //
-//   DANIS   1200x1200 : up, bottom     always exported
-//                       footer         only when DANIS ADD ON has real content;
-//                                      otherwise that page is removed from the
-//                                      product's working document, so the
-//                                      INDD matches the JPGs   -> 2 or 3 JPGs
-//   Service 250x250   : thumbnail
-//           800x600   : up, bottom
-//           1080x1920 : up, bottom
-//           1200x1200 : up, bottom                              -> 7 JPGs
-//
-// Variants: footer = DANIS page with a <<Footer>> frame; thumbnail = the
-// Service 250x250 page (historical name, kept); otherwise up/bottom from the
-// headline frame's position (upper / lower half of the page).
-const OUTPUT_RULES = {
-    danis: {
-        "1200x1200": { required: ["up", "bottom"], optional: ["footer"] },
-    },
-    service: {
-        "250x250": { required: ["thumbnail"], optional: [] },
-        "800x600": { required: ["up", "bottom"], optional: [] },
-        "1080x1920": { required: ["up", "bottom"], optional: [] },
-        "1200x1200": { required: ["up", "bottom"], optional: [] },
-    },
-};
-const SERVICE_THUMBNAIL_SIZE = "250x250";
+// Variant of a page (the last part of its JPG name):
+//   footer — the page has a <<Footer>> frame (optional: removed from the
+//            product's working document when DANIS ADD ON is empty, so the
+//            INDD matches the JPGs)
+//   a known name override (templatetype.js variantNames), e.g. the Service 250x250
+//            page is historically "thumbnail"
+//   up / bottom — from the headline frame's position (upper / lower half)
+// Known layouts can still have specific placement rules (placement.js
+// PLACEMENT_CONFIG.layoutPolicies) — optional overrides; unknown layouts use
+// the generic geometry fallback.
 
 // Temporary diagnostic: dumps the top-level keys of require("indesign") so we
 // can confirm the real names/shape of enums like FontStatuses, SaveOptions,
@@ -204,7 +191,7 @@ function productToken(headline) {
 // <DANIS_Herbst|Service_Herbst>_<year>_<product>_<WxH>_<up|bottom|footer|thumbnail>.jpg
 function buildOutputFileName(rec, layout) {
     return [
-        PROJECT_PREFIX[layout.subType],
+        typeInfo(layout.subType).prefix,
         rec.year,
         productToken(rec.headline),
         layout.size,
@@ -215,7 +202,7 @@ function buildOutputFileName(rec, layout) {
 // <DANIS_Herbst|Service_Herbst>_<year>_<product>.indd — one per product and
 // type; never contains a resolution or variant.
 function buildInddFileName(rec, subType) {
-    return [PROJECT_PREFIX[subType], rec.year, productToken(rec.headline)].join("_") + ".indd";
+    return [typeInfo(subType).prefix, rec.year, productToken(rec.headline)].join("_") + ".indd";
 }
 
 // DANIS ADD ON counts only with real content ("n/a" is already "" from
@@ -330,6 +317,32 @@ function subTypeFromPath(path) {
     return templateType().detectTemplateType(path);
 }
 
+// How a template type is handled (templatetype.js templateTypeInfo):
+// { type, known, folder, prefix, sublineColumns, sublineKey, variantNames }.
+function typeInfo(subType) {
+    return templateType().templateTypeInfo(subType);
+}
+
+// "DANIS" / "Service" / a generic type's own name — under output/, InDesign/, preview/.
+function typeFolder(subType) {
+    return typeInfo(subType).folder;
+}
+
+// The subline text a product row has for this template type, or null when
+// the type has no subline source (generic type without a "<TYPE> SUBLINE" /
+// "SUBLINE" column) — then the template's own subline text is kept.
+function sublineFor(rec, subType) {
+    const info = typeInfo(subType);
+    const cols = rec.columns || {};
+    if (info.sublineKey) {
+        // Known type: its column — unless the sheet doesn't have it at all.
+        if (rec.columns && !info.sublineColumns.some((c) => Object.prototype.hasOwnProperty.call(cols, c))) return null;
+        return rec[info.sublineKey] || "";
+    }
+    for (const c of info.sublineColumns) if (Object.prototype.hasOwnProperty.call(cols, c)) return cols[c];
+    return null;
+}
+
 // Our working copy only: unlock layers and items so frames can be filled.
 function unlockAll(doc) {
     for (let i = 0; i < doc.layers.length; i++) {
@@ -350,65 +363,132 @@ function usePoints(doc) {
     } catch (e) {}
 }
 
-// { subType, w, h, size, position, key } for one page (variants: see
-// OUTPUT_RULES). key is the rule name, e.g. "danis_up", "service_thumbnail".
-function pageLayout(page, subType) {
+// Every item on a page with this name (filtered) — to detect ambiguity.
+function allNamed(page, name, filter) {
+    const out = [];
+    const items = page.allPageItems;
+    for (let i = 0; i < items.length; i++) {
+        try {
+            const it = itemAt(items, i);
+            if (it.name === name && (!filter || filter(it))) out.push(it);
+        } catch (e) {}
+    }
+    return out;
+}
+
+function boundsOf(it) {
+    try { return Array.from(it.geometricBounds, (v) => Math.round(Number(v) * 100) / 100); } catch (e) { return null; }
+}
+
+function layerOf(it) {
+    try { return String(it.itemLayer.name); } catch (e) { return ""; }
+}
+
+// Dynamic layout descriptor of ONE page, from the document itself:
+//   { index, pageName, label, w, h, size, frames: { image, text, footer },
+//     position, key, generatable, known, errors: [], notes: [] }
+// generatable — has the placeholders a product page needs (one <<MainImage>>
+//   image frame + one <<Headline>> text frame). A page with NO placeholders
+//   is not generated (kept in the INDD as-is, info only).
+// errors — structural problems only: a placeholder missing on a page that
+//   has the other one, more than one of a placeholder (ambiguous), a
+//   <<MainImage>> that is a text frame.
+function describePage(page, index, subType) {
     const b = page.bounds; // [y1, x1, y2, x2]
     const w = Math.round(Number(b[3]) - Number(b[1]));
     const h = Math.round(Number(b[2]) - Number(b[0]));
-    let position;
-    if (subType === "danis" && findFooterFrame(page)) {
-        position = "footer";
-    } else if (subType === "service" && `${w}x${h}` === SERVICE_THUMBNAIL_SIZE) {
-        position = "thumbnail";
-    } else {
-        const g = findHeadlineFrame(page).geometricBounds;
-        const frameMid = (Number(g[0]) + Number(g[2])) / 2;
-        const pageMid = (Number(b[0]) + Number(b[2])) / 2;
-        position = frameMid < pageMid ? "up" : "bottom";
+    const d = { index, pageName: "", label: "", w, h, size: `${w}x${h}`, frames: {}, position: "", key: "",
+        generatable: false, known: false, errors: [], notes: [] };
+    try { d.pageName = String(page.name || ""); } catch (e) {}
+    try { d.label = String(page.label || ""); } catch (e) {}
+    const images = allNamed(page, FRAME_NAMES.image, (it) => !isTextFrame(it));
+    const imageAsText = allNamed(page, FRAME_NAMES.image, isTextFrame);
+    const texts = allNamed(page, FRAME_NAMES.text, isTextFrame);
+    const footers = allNamed(page, FRAME_NAMES.footer, isTextFrame);
+    const describe = (list) => ({ count: list.length, bounds: list[0] ? boundsOf(list[0]) : null, layer: list[0] ? layerOf(list[0]) : "" });
+    d.frames = { image: describe(images), text: describe(texts), footer: describe(footers) };
+    const where = `page ${index + 1} (${d.size})`;
+    if (imageAsText.length) d.errors.push(`${where}: ${FRAME_NAMES.image} is a text frame — it must be a graphic frame`);
+    if (images.length > 1) d.errors.push(`${where}: ${images.length} ${FRAME_NAMES.image} frames — ambiguous`);
+    if (texts.length > 1) d.errors.push(`${where}: ${texts.length} ${FRAME_NAMES.text} frames — ambiguous`);
+    if (footers.length > 1) d.errors.push(`${where}: ${footers.length} ${FRAME_NAMES.footer} frames — ambiguous`);
+    const hasAny = images.length || texts.length || footers.length || imageAsText.length;
+    if (!hasAny) {
+        d.notes.push(`${where}: no placeholders — kept, not generated`);
+        return d;
     }
-    return { subType, w, h, size: `${w}x${h}`, position, key: `${subType}_${position}` };
+    if (!images.length && !imageAsText.length) d.errors.push(`${where}: no ${FRAME_NAMES.image} image frame`);
+    if (!texts.length) d.errors.push(`${where}: no ${FRAME_NAMES.text} text frame`);
+    if (d.errors.length) return d;
+
+    if (footers.length) {
+        d.position = "footer";
+    } else if (typeInfo(subType).variantNames[d.size]) {
+        d.position = typeInfo(subType).variantNames[d.size];
+    } else {
+        const g = texts[0].geometricBounds;
+        d.position = (Number(g[0]) + Number(g[2])) / 2 < (Number(b[0]) + Number(b[2])) / 2 ? "up" : "bottom";
+    }
+    d.key = `${subType}_${d.position}`;
+    d.generatable = true;
+    try {
+        d.known = placementModule().getLayoutPolicy({ subType, size: d.size, position: d.position }).known;
+    } catch (e) {}
+    if (!d.known) d.notes.push(`${where}: new layout ${d.size} ${d.position} — generic geometry-based placement`);
+    return d;
 }
 
-// Detected size -> variants of a document, e.g. "250x250: thumbnail |
-// 800x600: up, bottom | …" — for the log and error messages.
+// { subType, w, h, size, position, key, pageName } for one page — the layout
+// identity used for placement policies, logs and JPG names.
+function pageLayout(page, subType) {
+    const d = describePage(page, 0, subType);
+    return { subType, w: d.w, h: d.h, size: d.size, position: d.position, key: d.key || `${subType}_page`, pageName: d.pageName };
+}
+
+// Layouts of a document, e.g. "1200x1200: up, bottom | 800x600: up" — for the
+// log and messages.
 function describeMapping(pages) {
     const bySize = {};
     for (const pg of pages) (bySize[pg.layout.size] = bySize[pg.layout.size] || []).push(pg.layout.position);
     return Object.keys(bySize).map((sz) => `${sz}: ${bySize[sz].join(", ")}`).join(" | ") || "(no pages)";
 }
 
-// Classifies every page (fresh references) and checks the result against
-// OUTPUT_RULES. Every valid page is exported. Returns { pages: [{index,
-// layout, export}], mapping, problems: string[] }.
+// Discovers the document's layouts (fresh references). Every generatable
+// page is a layout and is generated/exported — no required inventory.
+// Returns { pages: [{index, layout, export, descriptor}], skipped: [descriptor],
+//           mapping, problems: string[] (structural errors only),
+//           notes: string[] (info: new layouts, pages without placeholders,
+//           duplicates) }.
 function planPages(doc, subType) {
     const pages = [];
-    for (let p = 0; p < doc.pages.length; p++) {
-        pages.push({ index: p, layout: pageLayout(doc.pages.item(p), subType), export: true });
-    }
-    const rules = OUTPUT_RULES[subType];
+    const skipped = [];
     const problems = [];
+    const notes = [];
     const seen = {};
-    for (const pg of pages) {
-        const { size, position } = pg.layout;
-        const rule = rules[size];
-        if (!rule) {
-            problems.push(`page ${pg.index + 1}: unexpected size ${size} (expected ${Object.keys(rules).join(", ")})`);
-        } else if (rule.required.concat(rule.optional).indexOf(position) === -1) {
-            problems.push(`page ${pg.index + 1}: ${size} has no "${position}" variant ` +
-                `(expected ${rule.required.concat(rule.optional).join(", ")})`);
-        } else if (seen[size + position]) {
-            problems.push(`page ${pg.index + 1}: second ${size} "${position}" page`);
-        }
-        seen[size + position] = true;
+    for (let p = 0; p < doc.pages.length; p++) {
+        const d = describePage(doc.pages.item(p), p, subType);
+        problems.push(...d.errors);
+        notes.push(...d.notes);
+        if (!d.generatable) { if (!d.errors.length) skipped.push(d); continue; }
+        const id = d.size + " " + d.position;
+        if (seen[id]) notes.push(`page ${p + 1}: second ${id} layout — its JPG gets a -2 suffix`);
+        seen[id] = true;
+        pages.push({
+            index: p, export: true, descriptor: d,
+            layout: { subType, w: d.w, h: d.h, size: d.size, position: d.position, key: d.key, pageName: d.pageName, known: d.known },
+        });
     }
-    for (const size of Object.keys(rules)) {
-        for (const position of rules[size].required) {
-            if (!seen[size + position]) problems.push(`missing ${size} "${position}" page`);
-        }
+    if (!pages.length && !problems.length) {
+        problems.push(`no generatable page — no page has a ${FRAME_NAMES.image} image frame and a ${FRAME_NAMES.text} text frame`);
     }
-    if (problems.length) problems.push(`detected: ${describeMapping(pages)}`);
-    return { pages, mapping: describeMapping(pages), problems };
+    return { pages, skipped, mapping: describeMapping(pages), problems, notes };
+}
+
+// "✓ Template detected: 3 valid layouts (1200x1200 up, 800x600 bottom, 400x500 up)"
+function describeTemplateLayouts(plan) {
+    const n = plan.pages.length;
+    return `✓ Template detected: ${n} valid layout${n === 1 ? "" : "s"}` +
+        (n ? ` (${plan.pages.map((pg) => `${pg.layout.size} ${pg.layout.position}`).join(", ")})` : "");
 }
 
 // ---------- text replacement ----------
@@ -553,8 +633,86 @@ function writeParagraph(doc, frame, paraIndex, text, what) {
         ` expected ${JSON.stringify(String(text).trim())}`);
 }
 
+// ---------- stale optional placeholders ----------
+//
+// A template prepared from an older sheet may still hold an optional subline
+// placeholder (<<SERVICE SUBLINE>>, <<WINTER SUBLINE>> …) although the
+// current sheet has no such column. That token is stale prepared state, not
+// client copy: it is replaced silently by the client's original subline
+// (Prepare's label, or recovered from the client INDD), else removed — it
+// never reaches an INDD/JPG. Only subline tokens; required placeholders
+// (<<Headline>>, <<MainImage>>) are never touched by this.
+const ORIGINAL_SUBLINE_LABEL = "posterBatch.originalSubline"; // same key as datamerge.js
+const OPTIONAL_SUBLINE_TOKEN = /^<<[^<>]*SUBLINE[^<>]*>>$/i;
+
+// PURE. What a subline paragraph becomes when the sheet has NO subline
+// source: null = real text, keep it; otherwise the replacement for a stale
+// token — the original text if known, else "" (token removed).
+function staleSublineReplacement(currentText, original) {
+    if (!OPTIONAL_SUBLINE_TOKEN.test(String(currentText || "").trim())) return null;
+    const o = String(original || "").trim();
+    return o && !/^<<[^<>]*>>$/.test(o) ? o : "";
+}
+
+function readOriginalSubline(frame) {
+    try { return String(frame.extractLabel(ORIGINAL_SUBLINE_LABEL) || ""); } catch (e) { return ""; }
+}
+
+// The client's subline per page, read from the client INDD next to a
+// prepared template ("<client>_DataMerge[_N].indd" → "<client>.indd") — for
+// templates prepared before Prepare stored the original. Opened as a copy,
+// never changed. Returns { [pageIndex]: text } or null.
+async function recoverClientSublines(templatePath, pageCount) {
+    const clientPath = String(templatePath).replace(/_DataMerge(_\d+)?(\.indd)$/i, "$2");
+    if (clientPath === templatePath || !(await pathExists(clientPath))) return null;
+    let doc = null;
+    try {
+        doc = await openTemplateCopy(clientPath);
+        if (doc.pages.length !== pageCount) return null; // can't map pages safely
+        const out = {};
+        for (let p = 0; p < doc.pages.length; p++) {
+            const page = doc.pages.item(p);
+            let frame = findHeadlineFrame(page);
+            if (!frame) {
+                const onText = [];
+                const items = page.allPageItems;
+                for (let i = 0; i < items.length; i++) {
+                    try {
+                        const it = itemAt(items, i);
+                        if (isTextFrame(it) && String(it.itemLayer.name).toLowerCase() === "text") onText.push(it);
+                    } catch (e) {}
+                }
+                if (onText.length === 1) frame = onText[0];
+            }
+            if (!frame) continue;
+            const idx = nonEmptyParagraphs(frame.parentStory);
+            if (idx.length > 1) out[p] = paragraphText(frame.parentStory.paragraphs.item(idx[1]));
+        }
+        return out;
+    } catch (e) {
+        return null;
+    } finally {
+        closeWithoutSaving(doc);
+        await settle(250);
+    }
+}
+
+// Per page of an open prepared template: does its subline hold a stale-able
+// token with no stored original? (Then recovery from the client is worth it.)
+function needsSublineRecovery(doc) {
+    for (let p = 0; p < doc.pages.length; p++) {
+        const frame = findHeadlineFrame(doc.pages.item(p));
+        if (!frame || readOriginalSubline(frame)) continue;
+        const idx = nonEmptyParagraphs(frame.parentStory);
+        if (idx.length > 1 && OPTIONAL_SUBLINE_TOKEN.test(paragraphText(frame.parentStory.paragraphs.item(idx[1])))) return true;
+    }
+    return false;
+}
+
 // Headline + subline into <<Headline>>: 1st / 2nd non-empty paragraph of the
-// same frame. Returns a diagnostics string ("" when TEXT_DIAGNOSTICS is off).
+// same frame. subline null = the sheet has no subline source: real template
+// text is kept; a stale optional token is cleaned (staleSublineReplacement).
+// Returns a diagnostics string ("" when TEXT_DIAGNOSTICS is off).
 function setHeadlineText(doc, frame, headline, subline) {
     const before = TEXT_DIAGNOSTICS
         ? `BEFORE ${textSnapshot(frame)} placeholders=${placeholderSnapshot(doc, frame)}`
@@ -568,7 +726,13 @@ function setHeadlineText(doc, frame, headline, subline) {
         // Re-resolve after the story changed: never reuse a paragraph index or
         // reference from before the headline write.
         const after = nonEmptyParagraphs(frame.parentStory);
-        if (after.length > 1) writeParagraph(doc, frame, after[1], subline, "subline");
+        if (after.length > 1 && subline !== null) {
+            writeParagraph(doc, frame, after[1], subline, "subline");
+        } else if (after.length > 1) {
+            const current = paragraphText(frame.parentStory.paragraphs.item(after[1]));
+            const replacement = staleSublineReplacement(current, readOriginalSubline(frame));
+            if (replacement !== null) writeParagraph(doc, frame, after[1], replacement, "subline");
+        }
     } catch (e) {
         throw new Error(`${e}${before ? ` || ${before} || AFTER ${textSnapshot(frame)}` : ""}`);
     }
@@ -899,7 +1063,14 @@ function validatePage(page, layout, rec, subline) {
         const actualSubline = idx.length > 1 ? paragraphText(story.paragraphs.item(idx[1])) : "";
         parts.push(`headline=${JSON.stringify(actualHeadline)} subline=${JSON.stringify(actualSubline)}`);
         if (actualHeadline !== String(rec.headline).trim()) errors.push(`headline is ${JSON.stringify(actualHeadline)}`);
-        if (actualSubline !== String(subline || "").trim()) errors.push(`subline is ${JSON.stringify(actualSubline)}`);
+        // Checked only where there is a subline: a source value AND a subline
+        // paragraph in the template (a headline-only template has none).
+        const hasSublinePara = idx.length > 1 || String(subline || "").trim() === "";
+        if (subline !== null && hasSublinePara && actualSubline !== String(subline || "").trim()) {
+            errors.push(`subline is ${JSON.stringify(actualSubline)}`);
+        }
+        // Safety net: an unresolved optional placeholder must never be exported.
+        if (OPTIONAL_SUBLINE_TOKEN.test(actualSubline)) errors.push(`unresolved placeholder ${actualSubline} in the subline`);
         if (idx.length > 2) errors.push(`${idx.length} non-empty paragraphs in ${FRAME_NAMES.text} (expected 2)`);
         if (oversets(headlineFrame)) {
             warnings.push(`${FRAME_NAMES.text} text doesn't fit its frame — part of the headline/subline is hidden in the JPG`);
@@ -928,7 +1099,20 @@ function validatePage(page, layout, rec, subline) {
 function populateDocument(doc, t, rec) {
     const errors = [];
     const reports = [];
-    const subline = t.subType === "danis" ? rec.danis_subline : rec.service_subline;
+    const subline = sublineFor(rec, t.subType); // null = keep the template's subline text
+
+    // Older prepared templates: the client's subline (recovered by
+    // inspectTemplates) goes onto each headline frame BEFORE pages may be
+    // removed, so it stays attached to the right page.
+    if (t.recoveredSublines) {
+        for (let p = 0; p < doc.pages.length; p++) {
+            const text = t.recoveredSublines[p];
+            const frame = text ? findHeadlineFrame(doc.pages.item(p)) : null;
+            if (frame && !readOriginalSubline(frame)) {
+                try { frame.insertLabel(ORIGINAL_SUBLINE_LABEL, text); } catch (e) {}
+            }
+        }
+    }
 
     // Image frames per page before unbinding, so a lost frame is reported
     // instead of surfacing later as "no image".
@@ -942,14 +1126,15 @@ function populateDocument(doc, t, rec) {
     }
     if (errors.length) return { plan: null, reports, errors };
 
-    // Optional DANIS footer layout: not applicable -> page removed, so the
-    // INDD holds exactly the exported layouts.
-    if (t.subType === "danis" && !hasAddOn(rec)) {
+    // Optional footer layout (any page with a <<Footer>> frame): not
+    // applicable -> page removed, so the INDD holds exactly the exported layouts.
+    if (!hasAddOn(rec)) {
         for (let p = doc.pages.length - 1; p >= 0; p--) {
             const page = doc.pages.item(p);
-            if (pageLayout(page, t.subType).position === "footer") {
+            const l = pageLayout(page, t.subType);
+            if (l.position === "footer") {
                 page.remove();
-                reports.push(`danis_footer page removed (DANIS ADD ON empty)`);
+                reports.push(`${t.subType}_footer ${l.size} page removed (DANIS ADD ON empty)`);
             }
         }
     }
@@ -1092,9 +1277,10 @@ function uniqueName(name, used) {
 }
 
 // Opens each template once up front: checks it was prepared by datamerge.js,
-// can be told apart as DANIS / Service (one template per type), and that its
-// pages satisfy the output rules. Throws with every problem found, before
-// anything is rendered.
+// can be told apart as DANIS / Service (one template per type), and
+// DISCOVERS its layouts (planPages). Only structural problems fail the run —
+// there is no required set of layouts. Throws with every problem found,
+// before anything is rendered.
 async function inspectTemplates(templatePaths) {
     const templates = [];
     const problems = [];
@@ -1109,28 +1295,23 @@ async function inspectTemplates(templatePaths) {
             continue;
         }
         if (templates.some((t) => t.subType === subType)) {
-            problems.push(`${name}: more than one ${TYPE_FOLDER[subType]} template selected (one INDD per product and type)`);
+            problems.push(`${name}: more than one ${typeFolder(subType)} template selected (one INDD per product and type)`);
             continue;
         }
         let doc = null;
         try {
             doc = await openTemplateCopy(path);
             usePoints(doc);
-            let framesOk = true;
-            for (let p = 0; p < doc.pages.length; p++) {
-                const page = doc.pages.item(p);
-                const missing = [];
-                if (!findHeadlineFrame(page)) missing.push(FRAME_NAMES.text);
-                if (!findImageFrame(page)) missing.push(FRAME_NAMES.image);
-                if (missing.length) {
-                    framesOk = false;
-                    problems.push(`${name} page ${p + 1}: no ${missing.join(" / ")} frame`);
-                }
-            }
-            if (framesOk) {
-                const plan = planPages(doc, subType);
-                for (const pr of plan.problems) problems.push(`${name}: ${pr}`);
-                templates.push({ path, name, subType, mapping: plan.mapping });
+            const plan = planPages(doc, subType);
+            for (const pr of plan.problems) problems.push(`${name}: ${pr}`);
+            // Stale optional subline tokens without a stored original: recover
+            // the client's text once per template (silently; null if not possible).
+            const recoveredSublines = !plan.problems.length && needsSublineRecovery(doc)
+                ? await recoverClientSublines(path, doc.pages.length) : null;
+            if (!plan.problems.length) {
+                templates.push({ path, name, subType, mapping: plan.mapping, notes: plan.notes, recoveredSublines,
+                    detected: describeTemplateLayouts(plan),
+                    layouts: plan.pages.map((pg) => ({ page: pg.index + 1, size: pg.layout.size, position: pg.layout.position, known: pg.layout.known })) });
             }
         } catch (e) {
             problems.push(`${name}: could not open (${e})`);
@@ -1189,7 +1370,7 @@ function makeRun(totalOps, onProgress) {
 // Returns { subType, inddPath }.
 function inddPathFor(rec, templatePath, outputRootPath) {
     const subType = subTypeFromPath(templatePath);
-    const inddPath = [outputRootPath.replace(/\/+$/, ""), "InDesign", TYPE_FOLDER[subType],
+    const inddPath = [outputRootPath.replace(/\/+$/, ""), "InDesign", typeFolder(subType),
         buildInddFileName(rec, subType)].join("/");
     return { subType, inddPath };
 }
@@ -1226,11 +1407,14 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
     const templates = await inspectTemplates(templatePaths);
     const root = outputRootPath.replace(/\/+$/, "");
     const inddFolder = {};
-    for (const t of templates) inddFolder[t.subType] = await ensureFolders(root, ["InDesign", TYPE_FOLDER[t.subType]]);
+    for (const t of templates) inddFolder[t.subType] = await ensureFolders(root, ["InDesign", typeFolder(t.subType)]);
 
     const matchedRows = manifestRows.filter((r) => r.status === "matched");
     const run = makeRun(matchedRows.length * templates.length, onProgress);
-    for (const t of templates) run.line("", `${t.name} layouts`, "", "info", t.mapping);
+    for (const t of templates) {
+        run.line("", `${t.name} layouts`, "", "info", `${t.detected} — ${t.mapping}`);
+        for (const n of t.notes) run.line("", `${t.name} layouts`, "", "info", n);
+    }
 
     const generated = [];
     const failed = [];
@@ -1311,6 +1495,7 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
     const divider = "\n\n" + "-".repeat(60) + "\n\n";
     return run.result({
         generated, failed, imageChecks, imagePlanSummary,
+        templates: templates.map((t) => ({ name: t.name, subType: t.subType, detected: t.detected, layouts: t.layouts, notes: t.notes })),
         imageReport: ["EXTENSION PLANS PER PRODUCT", planText, "PER PAGE"].concat(imageReports).join(divider),
     });
 }
@@ -1452,12 +1637,12 @@ function summarizeImageStates(states) {
 // Preview JPGs of one product: <root>/preview/<DANIS|Service>/<product>/
 // (same folder every time, so previewing again overwrites the old preview).
 function previewFolderFor(root, rec, subType) {
-    return ensureFolders(root, ["preview", TYPE_FOLDER[subType], productToken(rec.headline)]);
+    return ensureFolders(root, ["preview", typeFolder(subType), productToken(rec.headline)]);
 }
 
 // The production folder of a template type: <root>/output/<DANIS|Service>.
 function outputFolderFor(outputRootPath, subType) {
-    return [outputRootPath.replace(/\/+$/, ""), "output", TYPE_FOLDER[subType]].join("/");
+    return [outputRootPath.replace(/\/+$/, ""), "output", typeFolder(subType)].join("/");
 }
 
 // items: [{rec, subType, inddPath}] — ONE product (row Preview / Commit) or
@@ -1479,7 +1664,7 @@ function outputFolderFor(outputRootPath, subType) {
 // including their edits — on Commit it's saved first, so INDD and JPGs stay
 // identical — and left open; an INDD that isn't open is opened without a
 // window and closed again. Pages are re-classified from the INDD itself
-// (OUTPUT_RULES), so a DANIS INDD without a footer page yields no footer JPG.
+// (planPages discovers them), so an INDD without a footer page yields no footer JPG.
 async function exportFromIndds(items, outputRootPath, onProgress, options) {
     const preview = !!(options && options.preview);
     const skipIfWarnings = !!(options && options.skipIfWarnings);
@@ -1507,7 +1692,7 @@ async function exportFromIndds(items, outputRootPath, onProgress, options) {
             usePoints(doc);
 
             const plan = planPages(doc, subType);
-            if (plan.problems.length) throw new Error("INDD layouts don't match the output rules: " + plan.problems.join(" / "));
+            if (plan.problems.length) throw new Error("INDD structure problem: " + plan.problems.join(" / "));
 
             // Check every page before exporting anything.
             const imageStates = [];
@@ -1544,7 +1729,7 @@ async function exportFromIndds(items, outputRootPath, onProgress, options) {
                 try {
                     const dir = preview
                         ? outcome.folder
-                        : await ensureFolders(root, ["output", TYPE_FOLDER[subType], pg.layout.size]);
+                        : await ensureFolders(root, ["output", typeFolder(subType), pg.layout.size]);
                     outPath = dir + "/" + uniqueName(buildOutputFileName(rec, pg.layout), usedJpg);
                     exportPageAsJPEG(doc, page, outPath, preview ? PREVIEW_RESOLUTION : FINAL_RESOLUTION);
                     const notes = pageWarnings(page).map((w) => "WARNING: " + w);
@@ -1651,7 +1836,7 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
         cfg = backend.config;
     }
     const plan = planPages(doc, item.subType);
-    if (plan.problems.length) throw new Error("INDD layouts don't match the output rules: " + plan.problems.join(" / "));
+    if (plan.problems.length) throw new Error("INDD structure problem: " + plan.problems.join(" / "));
 
     // 1. Analysis from the FINAL placed geometry, page by page.
     const registry = ext.createPlanRegistry();
@@ -1690,7 +1875,7 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     const unique = (base) => uniqueName(base + ".x", usedNames).replace(/\.x$/, "");
     const pageInfo = (p) => ({ layout: p.record.layout, page: p.record.page, size: p.pg.layout.size,
         width: p.pg.layout.w, height: p.pg.layout.h, variant: p.pg.layout.position, planId: p.plan.id });
-    const naming = { templateType: item.subType, prefix: PROJECT_PREFIX[item.subType], year: rec.year, product: headline };
+    const naming = { templateType: item.subType, prefix: typeInfo(item.subType).prefix, year: rec.year, product: headline };
     const usedForPages = (pages) => {
         if (pages.length === 1) {
             const pi = pageInfo(pages[0]);
@@ -1827,6 +2012,27 @@ function typeOfTemplate(path) {
     return subTypeFromPath(path);
 }
 
+// Opens a working copy of a prepared template and discovers its layouts
+// (for the panel after Prepare). Never changes the template.
+// Returns { subType, detected, layouts, notes, problems }.
+async function detectTemplateLayouts(templatePath) {
+    const subType = subTypeFromPath(templatePath);
+    let doc = null;
+    try {
+        doc = await openTemplateCopy(templatePath);
+        usePoints(doc);
+        const plan = planPages(doc, subType);
+        return {
+            subType, detected: plan.problems.length ? "" : describeTemplateLayouts(plan),
+            layouts: plan.pages.map((pg) => ({ page: pg.index + 1, size: pg.layout.size, position: pg.layout.position, known: pg.layout.known })),
+            notes: plan.notes, problems: plan.problems,
+        };
+    } finally {
+        closeWithoutSaving(doc);
+        await settle(250);
+    }
+}
+
 async function writeLog(logLines, logPath) {
     const lfs = require("uxp").storage.localFileSystem;
     const types = require("uxp").storage.types;
@@ -1836,6 +2042,6 @@ async function writeLog(logLines, logPath) {
 
 module.exports = {
     checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
-    isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible,
-    outputFolderFor, typeOfTemplate, TYPE_FOLDER, writeLog, debugModuleShape,
+    isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
+    outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
 };
