@@ -26,6 +26,14 @@
         "launchProcess": {
             "schemes": ["file"],
             "extensions": [".jpg", ""]
+        },
+        "network": {
+            "domains": [
+                "https://*.adobeioruntime.net",
+                "https://*.adobeio-static.net",
+                "https://firefly.azureedge.net",
+                "https://pre-signed-firefly-prod.s3-accelerate.amazonaws.com"
+            ]
         }
     }
 }

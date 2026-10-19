@@ -60,6 +60,7 @@ const el = {
     outputPath: document.getElementById("output-path"),
     btnGenerate: document.getElementById("btn-generate"),
     btnCommitAll: document.getElementById("btn-commit-all"),
+    btnExtendAll: document.getElementById("btn-extend-all"),
     btnExport: document.getElementById("btn-export"),
     statusCounts: document.getElementById("status-counts"),
     genProgress: document.getElementById("gen-progress"),
@@ -74,9 +75,6 @@ const el = {
     activeName: document.getElementById("active-name"),
     activeActions: document.getElementById("active-actions"),
     dialog: document.getElementById("action-dialog"),
-    dialogTitle: document.getElementById("dialog-title"),
-    dialogMessage: document.getElementById("dialog-message"),
-    dialogButtons: document.getElementById("dialog-buttons"),
 };
 
 // ---------- remembered selections + product statuses ----------
@@ -177,7 +175,7 @@ function templateTypeOf(path) {
 function showContext() {
     if (templatePaths.length) {
         const t = templateTypeOf(templatePaths[0]);
-        const label = t && render ? render.TYPE_FOLDER[t] : "?";
+        const label = t && render ? render.typeFolder(t) : "?";
         el.templateList.textContent = `${label} (${templatePaths[0].split("/").pop()})`;
     } else {
         el.templateList.textContent = "None yet — open the client template and prepare it";
@@ -206,6 +204,7 @@ function updateButtons() {
     el.btnMatch.disabled = busy || !(excelEntry && photosEntry);
     el.btnGenerate.disabled = busy || !(hasMatchedRows() && outputEntry && templatePaths.length);
     el.btnCommitAll.disabled = busy || readyRows().length === 0;
+    el.btnExtendAll.disabled = busy || !outputEntry || extendableRows().length === 0;
     el.btnExport.disabled = busy || !outputEntry || committedRows().length === 0;
     el.btnDmPrepare.disabled = busy || !excelEntry;
 }
@@ -312,21 +311,60 @@ function summarize(headline, result, channel, extraLine) {
 // Esc) — but only once the modal has FULLY closed: UXP refuses to open a
 // second modal while the first is still closing, which is why ⋯ → Regenerate
 // (whose confirmation is a second dialog) used to do nothing.
-function showDialog(title, message, buttons) {
-    const dlg = el.dialog;
+// The UXP modal window does not grow with its content, and InDesign keeps the
+// window size of a <dialog> element from its first showing — reusing one
+// element made later, longer dialogs clip their text and hide their buttons.
+// So every dialog is a FRESH copy of the #action-dialog template, sized
+// explicitly (element style + uxpShowModal size) from a conservative
+// estimate (≈ 46 characters per 18 px line, 34 px per button, 96 px for an
+// input box), and removed after it closes. The text wraps to the window's
+// real width, and the body scrolls if the estimate is ever short.
+const DIALOG_WIDTH = 440;
+function dialogSize(message, buttonCount, hasInput) {
+    const lines = String(message || "").split("\n")
+        .reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 46)), 0);
+    return { width: DIALOG_WIDTH, height: Math.min(780, 70 + lines * 18 + buttonCount * 34 + (hasInput ? 96 : 0)) };
+}
+
+// options.input: { label, placeholder } — adds an optional multi-line text
+// box; the promise then resolves with { value, text } instead of the value.
+function showDialog(title, message, buttons, options) {
+    const input = options && options.input;
+    const dlg = el.dialog.cloneNode(true);
+    dlg.removeAttribute("id");
+    document.body.appendChild(dlg);
     const native = typeof dlg.uxpShowModal === "function";
+    const titleNode = dlg.querySelector(".dialog-title");
     // UXP shows the title in the window's title bar; don't repeat it.
-    el.dialogTitle.textContent = native ? "" : title;
-    el.dialogTitle.style.display = native ? "none" : "";
-    el.dialogMessage.textContent = message || "";
-    el.dialogButtons.innerHTML = "";
+    titleNode.textContent = native ? "" : title;
+    titleNode.style.display = native ? "none" : "";
+    dlg.querySelector(".dialog-message").textContent = message || "";
+    let textBox = null;
+    const inputBox = dlg.querySelector(".dialog-input");
+    if (input) {
+        dlg.querySelector(".dialog-input-label").textContent = input.label || "";
+        textBox = dlg.querySelector(".dialog-input-text");
+        textBox.setAttribute("placeholder", input.placeholder || "");
+        inputBox.style.display = "";
+    } else {
+        inputBox.style.display = "none";
+    }
+    const buttonBox = dlg.querySelector(".dialog-buttons");
+    buttonBox.innerHTML = "";
+    const size = dialogSize(message, buttons.length + 1, !!input);
+    dlg.style.width = size.width + "px";
+    dlg.style.height = size.height + "px";
     return new Promise((resolve) => {
         let chosen = null;
+        let text = "";
         let settled = false;
         const settle = () => {
             if (settled) return;
             settled = true;
-            setTimeout(() => resolve(chosen), 100);
+            setTimeout(() => {
+                try { dlg.remove(); } catch (e) {}
+                resolve(input ? { value: chosen, text } : chosen);
+            }, 100);
         };
         for (const b of buttons.concat([{ label: "Cancel", value: null }])) {
             const btn = document.createElement("button");
@@ -335,13 +373,14 @@ function showDialog(title, message, buttons) {
             if (b.danger) btn.className = "danger";
             btn.addEventListener("click", () => {
                 chosen = b.value;
+                if (textBox) text = String(textBox.value || "").trim();
                 try { dlg.close(b.value || "cancel"); } catch (e) { settle(); }
             });
-            el.dialogButtons.appendChild(btn);
+            buttonBox.appendChild(btn);
         }
         dlg.addEventListener("close", settle, { once: true });
         try {
-            if (native) dlg.uxpShowModal({ title, resize: "none" }).then(settle, settle);
+            if (native) dlg.uxpShowModal({ title, resize: "both", size }).then(settle, settle);
             else dlg.showModal();
         } catch (e) {
             settle();
@@ -488,6 +527,16 @@ el.btnDmPrepare.addEventListener("click", async () => {
             return [`⚠ Page ${pg.page}`].concat(problems).join("\n");
         });
         if (!result.saved) pageLines.push("⚠ The template couldn't be saved — press Cmd+S in InDesign.");
+        // Layouts are discovered from the template itself — no fixed set.
+        if (result.saved && render) {
+            try {
+                const t = await render.detectTemplateLayouts(result.copyPath);
+                if (t.problems.length) pageLines.unshift("⚠ Template structure: " + t.problems.join("; "));
+                else pageLines.unshift(t.detected);
+            } catch (e) {
+                pageLines.push("Layouts not checked: " + errorText(e));
+            }
+        }
         el.dmSummary.textContent = pageLines.join("\n");
     } catch (e) {
         el.dmSummary.textContent = errorText(e);
@@ -571,7 +620,23 @@ const LABEL = {
     preview: "Preview Image Batch",
     commit: "Commit .indd",
     more: "⋯",
+    extend: "Extend Image",
+    reextend: "Re-extend Image",
+    hide: "Hide Extension",
+    show: "Show Extension",
 };
+
+// Image Extension buttons for a product (only those that apply now).
+function extensionButtons(rec, s, hasIndd) {
+    const c = extensionControls(s);
+    const out = [];
+    if (c.extend) out.push(button(LABEL.extend, () => extendRow(rec), "Fill the uncovered strip with a Firefly extension on the extendImage layer"));
+    if (c.reextend) out.push(button(LABEL.reextend, () => extendRow(rec), "Use the existing extension or generate a new variation"));
+    if (c.hide) out.push(button(LABEL.hide, () => toggleExtension(rec, false), "Turn the extendImage layer off to see the original layout"));
+    if (c.show) out.push(button(LABEL.show, () => toggleExtension(rec, true), "Turn the extendImage layer back on"));
+    for (const b of out) b.disabled = busy || !hasIndd;
+    return out;
+}
 
 function div(className, text) {
     const d = document.createElement("div");
@@ -598,6 +663,46 @@ function shortTime(iso) {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// Image Extension status of a product (worst page). The image warnings are
+// shown by this line instead of the generic warning list.
+const IMAGE_WARNING = /image (doesn't cover|needs review)|image \+ extension|image extension|Image check unavailable/i;
+const EXTENDED = ["extended", "extended_cached", "re_extended"];
+function versionText(image) {
+    const v = (image.versions || []).map((x) => "v" + String(x.version).padStart(3, "0"));
+    return v.length ? ` (${v.join(", ")})` : "";
+}
+function imageLine(image) {
+    switch (image.status) {
+        case "not_required": return ["detail-muted", "Image ✓ Covers frame"];
+        case "extension_available":
+        case "extension_required": return ["detail-warning", "Image ↗ " + (image.text || "Extension available")];
+        case "awaiting_user": return ["detail-warning", "Image ↗ Extension available — waiting for your choice"];
+        case "extending": return ["detail-muted", "Image ⟳ Extending…"];
+        case "extended": return ["detail-muted", "Image ✓ Extended" + versionText(image)];
+        case "extended_cached": return ["detail-muted", "Image ✓ Extended (cached)" + versionText(image)];
+        case "re_extended": return ["detail-muted", "Image ↻ Re-extended" + versionText(image)];
+        case "extension_hidden": return ["detail-warning", "Image ◌ " + (image.text || "Extension hidden") + " — Show Extension before Commit"];
+        case "skipped": return ["detail-warning", "Image ↗ Extension skipped — image doesn't cover its frame"];
+        case "needs_review": return ["detail-warning", "Image ⚠ Needs review — " + image.text];
+        default: return ["detail-error", "Image ✗ " + (image.text || "check failed")];
+    }
+}
+
+// Which Image Extension controls a product shows.
+function extensionControls(s) {
+    const image = (s && s.image) || {};
+    const st = image.status;
+    const extend = st === "extension_available" || st === "extension_required" || st === "skipped" || st === "awaiting_user";
+    // An extension is on the INDD (also when only some pages are extended).
+    const hasExt = !!image.extension || EXTENDED.indexOf(st) !== -1 || st === "extension_hidden";
+    return {
+        extend,
+        reextend: hasExt && !extend, // same dialog — one button is enough
+        hide: hasExt && st !== "extension_hidden",
+        show: st === "extension_hidden",
+    };
+}
+
 // Detail lines shown under a product — everything that used to be hidden in
 // hover tooltips (UXP panels don't reliably show them).
 const MAX_WARNINGS = 3;
@@ -610,7 +715,9 @@ function detailLines(rec, state, s) {
     if (rec.imagePath) lines.push(["detail-muted", "Image: " + rec.imagePath.split("/").pop()]);
     if (state === "unchecked") lines.push(["detail-muted", "Existing .indd found — not checked yet. Preview or commit it."]);
     if (s && s.error) lines.push(["detail-error", "✗ " + s.error]);
-    const warnings = (s && s.warnings) || [];
+    const image = s && s.image;
+    if (image) lines.push(imageLine(image));
+    const warnings = ((s && s.warnings) || []).filter((w) => !(image && IMAGE_WARNING.test(w)));
     for (const w of warnings.slice(0, MAX_WARNINGS)) lines.push(["detail-warning", "⚠ " + w]);
     if (warnings.length > MAX_WARNINGS) {
         lines.push(["detail-warning", `⚠ …and ${warnings.length - MAX_WARNINGS} more (see the log)`]);
@@ -653,6 +760,7 @@ function renderTable() {
             commit.disabled = busy || !hasIndd;
             actions.appendChild(preview);
             actions.appendChild(commit);
+            for (const b of extensionButtons(rec, s, hasIndd)) actions.appendChild(b);
             const more = button(LABEL.more, () => moreMenu(rec), "More actions");
             more.disabled = busy || !p;
             actions.appendChild(more);
@@ -685,7 +793,9 @@ function renderActiveProduct() {
     const commit = button(LABEL.commit, () => commitRow(rec));
     const more = button(LABEL.more, () => moreMenu(rec), "More actions");
     commit.disabled = busy;
-    for (const b of [preview, commit, more]) el.activeActions.appendChild(b);
+    const p = products.get(rec);
+    const extButtons = extensionButtons(rec, p ? getStatus(p.inddPath) : null, true);
+    for (const b of [preview, commit].concat(extButtons, [more])) el.activeActions.appendChild(b);
     el.activeProduct.classList.remove("hidden");
 }
 
@@ -738,6 +848,24 @@ function updateCounts() {
 
 // ---------- generate (all / one product) ----------
 
+// New image status from a fresh check, keeping what the check can't know:
+// the flavour of "extended" (cached / re-extended), versions, plans, and a
+// needs_review / skipped decision while the image still doesn't cover.
+function mergeImageStatus(old, fresh) {
+    const keep = (extra) => Object.assign({}, fresh, {
+        versions: fresh.versions || (old && old.versions) || null,
+        plans: fresh.plans || (old && old.plans) || null,
+    }, extra || {});
+    if (!old) return keep();
+    // Remember the flavour while hidden, restore it when shown again.
+    const flavour = EXTENDED.indexOf(old.status) !== -1 ? old.status : old.extendedAs;
+    if (fresh.status === "extension_hidden") return keep({ extendedAs: flavour || "extended" });
+    if (fresh.status === "extended" && flavour) return keep({ status: flavour });
+    if (fresh.status === "extension_available" && !fresh.extension &&
+        ["needs_review", "skipped", "failed"].indexOf(old.status) !== -1) return keep({ status: old.status, text: old.text });
+    return keep();
+}
+
 // Records a generateIndds() result in the status store.
 function recordGeneration(result) {
     for (const g of result.generated) {
@@ -747,6 +875,7 @@ function recordGeneration(result) {
             error: "",
             committedAt: null,
             exportedAt: null,
+            image: g.image || null,
         });
     }
     for (const f of result.failed) {
@@ -790,11 +919,21 @@ el.btnGenerate.addEventListener("click", async () => {
         const result = await runGenerate(manifestRows, "Generating INDDs…");
         const logPath = outputEntry.nativePath + "/generation_log.csv";
         await render.writeLog(result.logLines, logPath);
+        // Image Extension (phases 1–2): one record per page — frame / graphic
+        // bounds, detected underfill, source-pixel expansion, status.
+        await render.writeLog([JSON.stringify(result.imageChecks || [], null, 2)],
+            outputEntry.nativePath + "/image_extension_log.json");
+        await render.writeLog([result.imageReport || ""], outputEntry.nativePath + "/image_extension_log.txt");
         const review = result.generated.filter((g) => g.warnings.length).length;
+        const toExtend = result.generated.filter((g) => g.image && g.image.status === "extension_available").length;
+        const extendPages = (result.imageChecks || []).filter((r) => r.status === "extension_required").length;
         summarize(`✓ Generated ${result.generated.length} INDD(s)` +
             (review ? ` · ⚠ ${review} need review` : "") +
             (result.failed.length ? ` · ✗ ${result.failed.length} failed` : "") +
-            " — log: generation_log.csv", result, channels.generate);
+            (toExtend ? ` · ↗ ${toExtend} product(s) can be extended — use Extend Image` : "") +
+            (extendPages ? ` (${extendPages} page(s); one shared Firefly generation per product on Extend)` : "") +
+            " — logs: generation_log.csv, image_extension_log.txt / .json", result, channels.generate,
+            (result.templates || []).map((t) => t.detected).join("\n"));
     } catch (e) {
         setMessage(errorText(e), channels.generate);
     }
@@ -839,6 +978,9 @@ async function runExport(items, mode, title, skipIfWarnings) {
         for (const o of result.items) {
             if (o.error && !o.warnings.length) continue; // couldn't check — keep the old status
             const patch = { status: o.warnings.length ? "review" : "ready", warnings: o.warnings, error: "" };
+            // Image coverage (original + extension) re-checked on every page.
+            const old = getStatus(o.inddPath);
+            if (o.image) patch.image = mergeImageStatus(old && old.image, o.image);
             if (mode === "preview" && o.warnings.length) {
                 patch.committedAt = null; // a problem found after Commit needs a new Commit
                 patch.exportedAt = null;
@@ -904,6 +1046,182 @@ async function commitRow(rec) {
             result, channels.generate);
     } catch (e) {
         setMessage(errorText(e), channels.generate);
+    }
+}
+
+// ---------- Image Extension (per product, the designer's choice) ----------
+//
+// Nothing is generated or changed in an INDD without this choice:
+//   no existing extension:  Extend image · Skip
+//   existing extension:     Use existing extension · Re-extend image · Skip
+// Extend image and Re-extend image both make NEW Firefly generation(s) — in
+// the default consistent batch mode ONE master generation for the product,
+// clipped by every eligible page (more only if one can't serve them all).
+// No automatic reuse; every generation is a new version in generated_assets/.
+// Only "Use existing extension" applies stored versions. The result appears
+// on the INDD's extendImage layer; the original Image layer is never changed.
+async function extendRow(rec) {
+    const p = products.get(rec);
+    const s = getStatus(p.inddPath) || {};
+    const image = s.image || {};
+    const existing = EXTENDED.indexOf(image.status) !== -1 || image.status === "extension_hidden" || !!image.extension ||
+        (image.plans || []).some((x) => x.cachedVersion);
+    const previous = image;
+    setStatus(p.inddPath, { image: Object.assign({}, image, { status: "awaiting_user" }) });
+    renderTable();
+    const answer = await showDialog(`Image extension — ${rec.headline}`,
+        existing
+            ? "This product already has an extension.\n\n" +
+              "Use existing: show the stored version (no Firefly call).\n" +
+              "Re-extend: one new Firefly generation for this product, shared by all its pages; old versions are kept."
+            : "The image doesn't cover its frame on " + ((image.text || "").match(/\d+ page/) || ["some page"])[0] + "(s).\n\n" +
+              "Extend: one Firefly generation for this product; every page shows only its own uncovered strip from it, on the extendImage layer. The original image isn't changed.",
+        existing
+            ? [{ label: "Use existing extension", value: "use_existing" }, { label: "Re-extend image", value: "regenerate" }, { label: "Skip", value: "skip" }]
+            : [{ label: "Extend image", value: "extend" }, { label: "Skip", value: "skip" }],
+        { input: { label: "Prompt (optional) — guides what Firefly generates in the new area:",
+            placeholder: "e.g. wet asphalt road, evening light" } });
+    const choice = answer.value;
+    const prompt = answer.text.slice(0, 1024); // Firefly's limit
+    if (!choice) { setStatus(p.inddPath, { image: previous }); renderTable(); return; }
+    if (choice === "skip") {
+        const skipped = EXTENDED.indexOf(previous.status) !== -1 || previous.status === "extension_hidden"
+            ? previous : Object.assign({}, previous, { status: "skipped" });
+        setStatus(p.inddPath, { image: skipped });
+        renderTable();
+        return;
+    }
+    const item = itemFor(rec);
+    setBusy(true);
+    setStatus(p.inddPath, { image: Object.assign({}, previous, { status: "extending" }) });
+    startProgress(channels.generate, choice === "regenerate" ? "Re-extending" : "Extending", `Extending ${rec.headline}…`);
+    try {
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
+        const result = await render.extendProductImage(item, outputEntry.nativePath, choice, progressTo(channels.generate),
+            { prompt: choice === "use_existing" ? "" : prompt });
+        try {
+            await render.writeLog(result.logLines, outputEntry.nativePath + "/image_extension_apply_log.jsonl");
+        } catch (e) {}
+        setMessage(recordExtendResult(rec, previous, result, choice).join("\n"), channels.generate);
+    } catch (e) {
+        setStatus(p.inddPath, { image: previous });
+        setMessage(errorText(e), channels.generate);
+    } finally {
+        setBusy(false);
+    }
+}
+
+// Stores an extendProductImage() result as the product's status (Ready when
+// nothing else needs review) and returns the message lines for it.
+function recordExtendResult(rec, previous, result, choice) {
+    const p = products.get(rec);
+    setStatus(p.inddPath, {
+        status: result.warnings.length ? "review" : "ready",
+        warnings: result.warnings, error: "", committedAt: null, exportedAt: null,
+        image: mergeImageStatus(previous, result.image),
+    });
+    const applied = result.pages.filter((x) => x.applied).length;
+    const failedPages = result.generations.filter((x) => x.error);
+    const head = applied
+        ? `✓ ${choice === "regenerate" ? "Re-extended" : "Extended"} ${rec.headline} — ${applied} page(s)` +
+          (result.newGenerations ? ` · ${result.newGenerations} new Firefly generation(s)` : " · existing extension, no Firefly call") +
+          (result.batchMode === "consistent" && result.units.length ? ` · ${result.units.length === 1 ? "1 shared master" : result.units.length + " masters"}` : "") +
+          (result.newGenerations && result.prompt ? ` · prompt "${result.prompt}"` : "") +
+          (result.warnings.length ? ` · ⚠ ${result.warnings.length} warning(s) — Review` : " · Ready")
+        : `✗ ${rec.headline} was not extended`;
+    return [head].concat(failedPages.map((x) => `✗ ${x.layout} (${x.planId}): ${x.error}`));
+}
+
+// ---------- Extend All Images ----------
+//
+// One deliberate click for every product whose image doesn't cover its frame
+// yet (status "extension available"): the same Extend image as the product's
+// own button, product after product — default consistent batch = one Firefly
+// generation per product. Products already extended, skipped by the designer,
+// needing review or without an INDD are left alone. The INDDs are opened in
+// the background, saved and closed again (an INDD that is open stays open).
+function extendableRows() {
+    return manifestRows.filter((rec) => {
+        const p = products.get(rec);
+        if (!p || !p.exists) return false;
+        const st = ((getStatus(p.inddPath) || {}).image || {}).status;
+        return st === "extension_available" || st === "extension_required";
+    });
+}
+
+el.btnExtendAll.addEventListener("click", async () => {
+    const rows = extendableRows();
+    if (!rows.length) return;
+    const answer = await showDialog("Extend All Images",
+        `${rows.length} product(s) have an image that doesn't cover its frame.\n\n` +
+        "Extend All: one Firefly generation per product; every page shows only its own uncovered strip, " +
+        "on the extendImage layer. Original images aren't changed. Products you skipped or already extended are left alone.",
+        [{ label: `Extend ${rows.length} product(s)`, value: "go" }],
+        { input: { label: "Prompt (optional) — used for every product in this run:",
+            placeholder: "e.g. wet asphalt road, evening light" } });
+    if (answer.value !== "go") return;
+    const prompt = answer.text.slice(0, 1024);
+    setBusy(true);
+    startProgress(channels.generate, "Extending", `Extending ${rows.length} product(s)…`);
+    const lines = [];
+    const log = [];
+    let extended = 0, failed = 0;
+    try {
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
+        for (let i = 0; i < rows.length; i++) {
+            const rec = rows[i];
+            const p = products.get(rec);
+            const previous = (getStatus(p.inddPath) || {}).image || {};
+            progressTo(channels.generate)(i, rows.length, rec.headline);
+            setStatus(p.inddPath, { image: Object.assign({}, previous, { status: "extending" }) });
+            renderTable();
+            try {
+                const result = await render.extendProductImage(itemFor(rec), outputEntry.nativePath, "extend", null,
+                    { prompt, background: true });
+                log.push(...result.logLines);
+                const msg = recordExtendResult(rec, previous, result, "extend");
+                if (result.pages.some((x) => x.applied)) extended++; else failed++;
+                lines.push(...msg.filter((l) => l.startsWith("✗")));
+            } catch (e) {
+                failed++;
+                setStatus(p.inddPath, { image: previous });
+                lines.push(`✗ ${rec.headline}: ${errorText(e)}`);
+            }
+            progressTo(channels.generate)(i + 1, rows.length, rec.headline);
+        }
+        try { await render.writeLog(log, outputEntry.nativePath + "/image_extension_apply_log.jsonl"); } catch (e) {}
+        const ready = rows.filter((r) => rowState(r) === "ready").length;
+        setMessage([`✓ Extended ${extended} of ${rows.length} product(s)` + (failed ? ` · ✗ ${failed} not extended` : "") +
+            ` · ${ready} now Ready — log: image_extension_apply_log.jsonl`].concat(lines.slice(0, 8),
+            lines.length > 8 ? [`…and ${lines.length - 8} more — see the log.`] : []).join("\n"), channels.generate);
+    } catch (e) {
+        setMessage(errorText(e), channels.generate);
+    } finally {
+        setBusy(false);
+    }
+});
+
+// Show / Hide Extension: toggles the INDD's extendImage layer (the original
+// Image layer is untouched either way). Hidden = the JPG would show the
+// uncovered strip, so the product goes back to Review until shown again.
+async function toggleExtension(rec, visible) {
+    const p = products.get(rec);
+    const old = (getStatus(p.inddPath) || {}).image;
+    setBusy(true);
+    try {
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
+        const result = await render.setExtensionVisible(itemFor(rec), visible);
+        setStatus(p.inddPath, {
+            status: result.warnings.length ? "review" : "ready",
+            warnings: result.warnings, committedAt: null, exportedAt: null,
+            image: mergeImageStatus(old, result.image),
+        });
+        setMessage(`${visible ? "Extension shown" : "Extension hidden"} — ${rec.headline}` +
+            (result.saved ? "" : " (INDD has other unsaved edits — not saved; Commit saves it)"), channels.generate);
+    } catch (e) {
+        setMessage(errorText(e), channels.generate);
+    } finally {
+        setBusy(false);
     }
 }
 

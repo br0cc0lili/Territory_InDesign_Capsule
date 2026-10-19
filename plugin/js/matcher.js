@@ -121,10 +121,9 @@ async function readExcelRows(excelEntry) {
         serviceSubline: col("SERVICE SUBLINE"),
         year: col("YEAR"),
     };
+    // Only the headline (product identity) is required; every other column
+    // is used when it exists and ignored when it doesn't.
     if (COLS.headline === -1) COLS.headline = 0;
-    for (const key of ["danisSubline", "serviceSubline"]) {
-        if (COLS[key] === -1) throw new Error(`Column for "${key}" not found in sheet "${SHEET_NAME}"`);
-    }
 
     // "n/a" in the sheet means "no text for this field".
     const cell = (row, idx) => {
@@ -133,6 +132,12 @@ async function readExcelRows(excelEntry) {
         return v.toLowerCase() === "n/a" ? "" : v;
     };
 
+    const headers = (raw[0] || []).map((h) => String(h == null ? "" : h).trim().replace(/\s+/g, " ").toUpperCase());
+    const allColumns = (row) => {
+        const out = {};
+        headers.forEach((h, i) => { if (h && !(h in out)) out[h] = cell(row, i); });
+        return out;
+    };
     const rows = [];
     for (let r = 1; r < raw.length; r++) { // skip header row
         const headline = cell(raw[r], COLS.headline);
@@ -144,6 +149,9 @@ async function readExcelRows(excelEntry) {
             danis_addon: cell(raw[r], COLS.danisAddOn),
             service_subline: cell(raw[r], COLS.serviceSubline),
             year: cell(raw[r], COLS.year) || String(new Date().getFullYear()),
+            // Every column by its (upper-case) header — lets a generic
+            // template type find its own "<TYPE> SUBLINE" column.
+            columns: allColumns(raw[r]),
         });
     }
     return rows;

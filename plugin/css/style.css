@@ -227,6 +227,17 @@ td button {
     margin: 0;
 }
 
+/* Extend All Images above Commit All Ready .indd, same width. */
+.batch-buttons {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.batch-buttons button + button {
+    margin-top: 6px;
+}
+
 .status-counts {
     font-size: 11px;
     color: #ccc;
@@ -244,8 +255,10 @@ dialog {
 
 .dialog-body {
     padding: 14px 16px;
-    min-width: 260px;
-    max-width: 380px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    overflow-y: auto; /* fallback if the size estimate is short */
 }
 
 .dialog-body h3 {
@@ -255,8 +268,27 @@ dialog {
 
 .dialog-message {
     font-size: 12px;
+    line-height: 18px;
     white-space: pre-line;
+    word-wrap: break-word;
     margin: 0 0 12px;
+}
+
+.dialog-input {
+    margin: 0 0 12px;
+}
+
+.dialog-input-label {
+    font-size: 11px;
+    color: #bbb;
+    margin: 0 0 4px;
+}
+
+.dialog-input-text {
+    width: 100%;
+    box-sizing: border-box;
+    height: 56px;
+    font-size: 12px;
 }
 
 .dialog-buttons {

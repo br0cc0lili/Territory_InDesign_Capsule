@@ -55,11 +55,16 @@ const FIELD_NAMES = {
     footer: ["DANIS ADD ON"],
     image: ["MAINIMAGE"],
 };
-const REQUIRED_ROLES = ["headline", "danis", "service", "image"];
+// Only what every prepared page needs; sublines / footer are used when the
+// data source has them and skipped silently when it doesn't.
+const REQUIRED_ROLES = ["headline", "image"];
 
 // Client layer names (matched case-insensitively).
 const LAYERS = { text: "text", footer: "footer", image: "image" };
-const REQUIRED_LAYERS = [LAYERS.text, LAYERS.image];
+
+// Script label (on the <<Headline>> frame) holding the client's original
+// subline text — written by Prepare, read by render.js.
+const ORIGINAL_SUBLINE_LABEL = "posterBatch.originalSubline";
 
 // Explicit frame names; checked before the layers.
 const FRAME_NAMES = { text: "<<Headline>>", footer: "<<Footer>>", image: "<<MainImage>>" };
@@ -70,10 +75,10 @@ const FRAME_TYPES = ["Rectangle", "Polygon", "Oval"];
 const SHEET_NAME = "AOZ+AOT";
 const CSV_COLUMNS = [
     { header: "DANIS + SERVICE HEADLINE +PRODUCT NAMING", from: "DANIS + SERVICE HEADLINE +PRODUCT NAMING" },
-    { header: "DANIS SUBLINE", from: "DANIS SUBLINE" },
-    { header: "SERVICE SUBLINE", from: "SERVICE SUBLINE" },
+    { header: "DANIS SUBLINE", from: "DANIS SUBLINE", optional: true },
+    { header: "SERVICE SUBLINE", from: "SERVICE SUBLINE", optional: true },
     { header: "DANIS ADD ON", from: "DANIS ADD ON", optional: true },
-    { header: "PICTURE NAME", from: "PICTURE NAME" },
+    { header: "PICTURE NAME", from: "PICTURE NAME", optional: true },
 ];
 const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".psd"];
 
@@ -269,6 +274,10 @@ function templateType() {
 // neither or both of DANIS / SERVICE. The working copy is named
 // "<client name>_DataMerge.indd", so it classifies like the client file,
 // which prepareActiveDocument() checks before any copy is made.
+function dmFieldsOf(doc) {
+    try { return doc.dataMergeProperties.dataMergeFields; } catch (e) { return []; }
+}
+
 function detectSubType(docName) {
     return { subType: templateType().detectTemplateType(docName), source: "file name" };
 }
@@ -404,15 +413,27 @@ function prepareText(doc, page, field, entry) {
         ? step("read subline", () => paragraphText(frame.paragraphs.item(sublineIdx)))
         : "";
     const { subType, source } = detectSubType(doc.name);
-    const sublineField = field[subType];
+    // Known types: their own subline field. Generic types: a "<TYPE> SUBLINE"
+    // (or "SUBLINE") column if the data source has one; otherwise the
+    // template's subline text stays as it is.
+    const info = templateType().templateTypeInfo(subType);
+    const sublineField = info.known ? field[subType] : findField(dmFieldsOf(doc), info.sublineColumns);
 
     // Subline first: it sits later in the story, so doing it first keeps
     // the headline's paragraph index valid.
-    if (sublineIdx !== -1) {
+    if (sublineIdx !== -1 && !sublineField) {
+        entry.notes.push(`subline "${sublineText}" kept as template text (no ${info.sublineColumns.join(" / ")} column for type ${subType})`);
+    } else if (sublineIdx !== -1) {
+        // Remember the client's real subline on the frame (script label): if a
+        // later sheet has no subline column, Generate restores this text
+        // instead of exporting the <<…SUBLINE>> placeholder.
+        if (!/^<<[^<>]*>>$/.test(sublineText)) {
+            try { frame.insertLabel(ORIGINAL_SUBLINE_LABEL, sublineText); } catch (e) {}
+        }
         placeholderIntoParagraph(doc, frame, sublineIdx, sublineField);
         entry.notes.push(`subline "${sublineText}" → <<${sublineField.fieldName}>> (${subType}, from ${source})`);
     } else {
-        entry.notes.push("⚠ only one non-empty paragraph — subline placeholder not added");
+        entry.notes.push("one paragraph only — no subline in this template, nothing to add");
     }
 
     placeholderIntoParagraph(doc, frame, headlineIdx, field.headline);
@@ -657,11 +678,10 @@ async function prepareActiveDocument(csvPath) {
     try { src = app.documents.length ? app.activeDocument : null; } catch (e) { src = null; }
     if (!src) throw new Error("No document is open — open the client .indd first.");
 
-    // Template type and layers are checked on the client file (read-only)
-    // before any copy is made: a name without DANIS/SERVICE (or with both)
-    // stops here, exactly as it would in Render.
+    // Template type is checked on the client file (read-only) before any copy
+    // is made: a name with both DANIS and SERVICE stops here, exactly as it
+    // would in Render. Layers are not required (frames may be named instead).
     detectSubType(src.name);
-    checkLayers(src);
 
     // doc.saved is deliberately not consulted — see resolveSourcePath().
     const { path: sourcePath, diagnostics } = await resolveSourcePath(src);
@@ -701,21 +721,25 @@ async function prepareActiveDocument(csvPath) {
     return Object.assign(result, { sourcePath, copyPath, saved, diagnostics });
 }
 
-function checkLayers(doc) {
-    const missingLayers = REQUIRED_LAYERS.filter((n) => !findLayer(doc, n));
-    if (missingLayers.length) {
-        throw new Error(`Layer(s) not found in ${doc.name}: ${missingLayers.join(", ")}. ` +
-            `Expected layers "text" (headline + subline), "Image" and optionally "footer".`);
+// The "text" / "Image" / "footer" layers are one way to find the frames
+// (named frames are the other) — none of them is required by itself. A page
+// only fails when it really lacks its frames (prepareText / prepareImage).
+
+// True if a page has anything to prepare (a headline or image frame, by name
+// or by layer). Pages without are left exactly as they are, silently.
+function hasPlaceholderCandidates(page) {
+    try {
+        const t = findMainTextFrame(page);
+        const i = findImageFrame(page);
+        return !!(t.frame || t.error || i.frame || i.error);
+    } catch (e) {
+        return true;
     }
 }
 
 // The actual preparation, on whichever document it is given.
 async function prepareDocument(doc, csvPath) {
-    checkLayers(doc);
     const warnings = [];
-    if (!findLayer(doc, LAYERS.footer)) {
-        warnings.push(`no "${LAYERS.footer}" layer — footer placeholders only where a frame is named ${FRAME_NAMES.footer}`);
-    }
 
     const dmp = doc.dataMergeProperties;
     try {
@@ -752,6 +776,10 @@ async function prepareDocument(doc, csvPath) {
             const page = doc.pages.item(p);
             const entry = { page: page.name, label: page.label || "", ok: true, notes: [] };
             report.push(entry);
+            if (!hasPlaceholderCandidates(page)) {
+                entry.notes.push("no headline / image frame — page left as is");
+                continue;
+            }
 
             for (const [what, step] of [
                 ["text", prepareText],
@@ -819,12 +847,22 @@ async function excelToDataSource(excelEntry, photosFolderEntry) {
 
     const header = raw[0].map((h) => normalizeField(h));
     const colIdx = CSV_COLUMNS.map((c) => header.indexOf(normalizeField(c.from)));
+    // Product identity: the headline column, or — like matcher.js — the first column.
+    if (colIdx[0] === -1) colIdx[0] = 0;
     const missing = CSV_COLUMNS.filter((c, i) => colIdx[i] === -1 && !c.optional).map((c) => c.from);
     if (missing.length) throw new Error(`Column(s) not found in sheet "${SHEET_NAME}": ${missing.join(", ")}`);
     // Optional columns absent from the sheet are left out of the CSV
     // entirely, so the template doesn't get a placeholder for them.
     const columns = CSV_COLUMNS.filter((c, i) => colIdx[i] !== -1);
     const columnIdx = colIdx.filter((i) => i !== -1);
+    // Any other "<TYPE> SUBLINE" / "SUBLINE" column is carried along, so a
+    // generic template type (templatetype.js) can get its own subline field.
+    header.forEach((h, i) => {
+        if (/(^| )SUBLINE$/.test(h) && !columns.some((c) => normalizeField(c.from) === h)) {
+            columns.push({ header: String(raw[0][i]).trim(), from: h, optional: true });
+            columnIdx.push(i);
+        }
+    });
 
     const imagesByName = {};
     if (photosFolderEntry) {
@@ -833,7 +871,8 @@ async function excelToDataSource(excelEntry, photosFolderEntry) {
             if (!imagesByName[base]) imagesByName[base] = f.nativePath;
         }
     }
-    const pictureCol = columnIdx[columns.findIndex((c) => c.from === "PICTURE NAME")];
+    const pictureIdx = columns.findIndex((c) => c.from === "PICTURE NAME");
+    const pictureCol = pictureIdx === -1 ? -1 : columnIdx[pictureIdx];
 
     const lines = [columns.map((c) => csvCell(c.header)).concat("@MainImage").join(",")];
     let rows = 0, imagesResolved = 0;
@@ -844,7 +883,7 @@ async function excelToDataSource(excelEntry, photosFolderEntry) {
             return v.toLowerCase() === "n/a" ? "" : v;
         });
         if (!cells[0]) continue; // no headline -> not a product row
-        const picture = String(row[pictureCol] || "").trim().toLowerCase();
+        const picture = pictureCol === -1 ? "" : String(row[pictureCol] || "").trim().toLowerCase();
         const imagePath = imagesByName[picture] || "";
         if (imagePath) imagesResolved++;
         lines.push(cells.concat(imagePath).map(csvCell).join(","));
