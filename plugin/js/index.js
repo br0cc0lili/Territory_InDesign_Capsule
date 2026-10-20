@@ -74,6 +74,7 @@ const el = {
     activeProduct: document.getElementById("active-product"),
     activeName: document.getElementById("active-name"),
     activeActions: document.getElementById("active-actions"),
+    activeStatus: document.getElementById("active-status"),
     dialog: document.getElementById("action-dialog"),
 };
 
@@ -320,10 +321,19 @@ function summarize(headline, result, channel, extraLine) {
 // input box), and removed after it closes. The text wraps to the window's
 // real width, and the body scrolls if the estimate is ever short.
 const DIALOG_WIDTH = 440;
-function dialogSize(message, buttonCount, hasInput) {
+function dialogSize(message, buttonCount, hasInput, entries) {
     const lines = String(message || "").split("\n")
         .reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 46)), 0);
-    return { width: DIALOG_WIDTH, height: Math.min(780, 70 + lines * 18 + buttonCount * 34 + (hasInput ? 96 : 0)) };
+    // Product-actions entries: headings, status lines, prompt box, details toggle.
+    let extra = 0, plainButtons = buttonCount;
+    for (const e of entries || []) {
+        if (e.header) { extra += 24; plainButtons--; }
+        else if (e.status) { extra += e.status.length * 18 + 6; plainButtons--; }
+        else if (e.prompt) { extra += 70; plainButtons--; }
+        else if (e.details) { extra += 34; plainButtons--; }
+    }
+    const height = (message ? 70 + lines * 18 : 60) + plainButtons * 34 + extra + (hasInput ? 96 : 0);
+    return { width: DIALOG_WIDTH, height: Math.min(780, height) };
 }
 
 // options.input: { label, placeholder } — adds an optional multi-line text
@@ -339,6 +349,7 @@ function showDialog(title, message, buttons, options) {
     titleNode.textContent = native ? "" : title;
     titleNode.style.display = native ? "none" : "";
     dlg.querySelector(".dialog-message").textContent = message || "";
+    dlg.querySelector(".dialog-message").style.display = message ? "" : "none";
     let textBox = null;
     const inputBox = dlg.querySelector(".dialog-input");
     if (input) {
@@ -351,7 +362,7 @@ function showDialog(title, message, buttons, options) {
     }
     const buttonBox = dlg.querySelector(".dialog-buttons");
     buttonBox.innerHTML = "";
-    const size = dialogSize(message, buttons.length + 1, !!input);
+    const size = dialogSize(message, buttons.length + 1, !!input, buttons);
     dlg.style.width = size.width + "px";
     dlg.style.height = size.height + "px";
     return new Promise((resolve) => {
@@ -363,10 +374,59 @@ function showDialog(title, message, buttons, options) {
             settled = true;
             setTimeout(() => {
                 try { dlg.remove(); } catch (e) {}
-                resolve(input ? { value: chosen, text } : chosen);
+                resolve(input || (options && options.withText) ? { value: chosen, text } : chosen);
             }, 100);
         };
-        for (const b of buttons.concat([{ label: "Cancel", value: null }])) {
+        let inlineBox = null; // an inline prompt box (Product actions)
+        const closeLabel = (options && options.closeLabel) || "Cancel";
+        for (const b of buttons.concat([{ label: closeLabel, value: null }])) {
+            if (b.header) { // a small group heading, not a button (⋯ More actions)
+                const h = document.createElement("div");
+                h.className = "dialog-group";
+                h.textContent = b.header;
+                buttonBox.appendChild(h);
+                continue;
+            }
+            if (b.status) { // short "Subject ✓ Detected" style lines
+                for (const [cls, text] of b.status) {
+                    const line = document.createElement("div");
+                    line.className = "dialog-status " + (cls || "");
+                    line.textContent = text;
+                    buttonBox.appendChild(line);
+                }
+                continue;
+            }
+            if (b.prompt) { // optional text box inside the button list
+                const lab = document.createElement("div");
+                lab.className = "dialog-input-label";
+                lab.textContent = b.prompt.label || "";
+                inlineBox = document.createElement("textarea");
+                inlineBox.className = "dialog-input-text";
+                inlineBox.setAttribute("rows", "2");
+                inlineBox.setAttribute("maxlength", "1024");
+                inlineBox.setAttribute("placeholder", b.prompt.placeholder || "");
+                buttonBox.appendChild(lab);
+                buttonBox.appendChild(inlineBox);
+                continue;
+            }
+            if (b.details) { // collapsed by default; toggling doesn't close the dialog
+                const box = document.createElement("div");
+                box.className = "dialog-details";
+                box.textContent = b.details;
+                box.style.display = "none";
+                const toggle = document.createElement("button");
+                toggle.type = "button";
+                toggle.className = "dialog-details-toggle";
+                toggle.textContent = "View details ▸";
+                toggle.addEventListener("click", () => {
+                    const open = box.style.display === "none";
+                    box.style.display = open ? "" : "none";
+                    toggle.textContent = open ? "Hide details ▾" : "View details ▸";
+                });
+                buttonBox.appendChild(toggle);
+                buttonBox.appendChild(box);
+                continue;
+            }
             const btn = document.createElement("button");
             btn.type = "button";
             btn.textContent = b.label;
@@ -374,6 +434,7 @@ function showDialog(title, message, buttons, options) {
             btn.addEventListener("click", () => {
                 chosen = b.value;
                 if (textBox) text = String(textBox.value || "").trim();
+                if (inlineBox) text = String(inlineBox.value || "").trim();
                 try { dlg.close(b.value || "cancel"); } catch (e) { settle(); }
             });
             buttonBox.appendChild(btn);
@@ -622,21 +683,10 @@ const LABEL = {
     more: "⋯",
     extend: "Extend Image",
     reextend: "Re-extend Image",
+    useExisting: "Use Existing Extension",
     hide: "Hide Extension",
     show: "Show Extension",
 };
-
-// Image Extension buttons for a product (only those that apply now).
-function extensionButtons(rec, s, hasIndd) {
-    const c = extensionControls(s);
-    const out = [];
-    if (c.extend) out.push(button(LABEL.extend, () => extendRow(rec), "Fill the uncovered strip with a Firefly extension on the extendImage layer"));
-    if (c.reextend) out.push(button(LABEL.reextend, () => extendRow(rec), "Use the existing extension or generate a new variation"));
-    if (c.hide) out.push(button(LABEL.hide, () => toggleExtension(rec, false), "Turn the extendImage layer off to see the original layout"));
-    if (c.show) out.push(button(LABEL.show, () => toggleExtension(rec, true), "Turn the extendImage layer back on"));
-    for (const b of out) b.disabled = busy || !hasIndd;
-    return out;
-}
 
 function div(className, text) {
     const d = document.createElement("div");
@@ -671,21 +721,36 @@ function versionText(image) {
     const v = (image.versions || []).map((x) => "v" + String(x.version).padStart(3, "0"));
     return v.length ? ` (${v.join(", ")})` : "";
 }
+// One short line per product; details live in ⋯ More actions and the logs.
 function imageLine(image) {
     switch (image.status) {
-        case "not_required": return ["detail-muted", "Image ✓ Covers frame"];
+        case "not_required": return ["detail-muted", "Image ✓ Covered"];
         case "extension_available":
-        case "extension_required": return ["detail-warning", "Image ↗ " + (image.text || "Extension available")];
-        case "awaiting_user": return ["detail-warning", "Image ↗ Extension available — waiting for your choice"];
+        case "extension_required":
+        case "awaiting_user":
+        case "skipped": return ["detail-warning", "Image ↗ Extension available"];
         case "extending": return ["detail-muted", "Image ⟳ Extending…"];
-        case "extended": return ["detail-muted", "Image ✓ Extended" + versionText(image)];
-        case "extended_cached": return ["detail-muted", "Image ✓ Extended (cached)" + versionText(image)];
-        case "re_extended": return ["detail-muted", "Image ↻ Re-extended" + versionText(image)];
-        case "extension_hidden": return ["detail-warning", "Image ◌ " + (image.text || "Extension hidden") + " — Show Extension before Commit"];
-        case "skipped": return ["detail-warning", "Image ↗ Extension skipped — image doesn't cover its frame"];
-        case "needs_review": return ["detail-warning", "Image ⚠ Needs review — " + image.text];
-        default: return ["detail-error", "Image ✗ " + (image.text || "check failed")];
+        case "extended":
+        case "extended_cached": return ["detail-muted", "Image ✓ Extended"];
+        case "re_extended": return ["detail-muted", "Image ↻ Re-extended"];
+        case "extension_hidden": return ["detail-warning", "Image ◌ Extension hidden"];
+        case "needs_review": return ["detail-warning", "Image ⚠ Needs review"];
+        default: return ["detail-error", "Image ✗ Check failed"];
     }
+}
+
+// Pages that still need an extension (for "Image ↗ 5 pages need extension").
+function pagesNeedingExtension(s) {
+    const image = (s && s.image) || {};
+    if (typeof image.pages === "number" && image.pages > 0 && !image.extension) return image.pages;
+    return ((s && s.warnings) || []).filter((w) => /image doesn't cover its frame/.test(w)).length;
+}
+
+// Bounding-box (subject) result of the last Generate — status only.
+function subjectLine(s) {
+    const subj = s && s.subject;
+    if (!subj) return null;
+    return subj.detected ? ["detail-muted", "Subject ✓ Detected"] : ["detail-muted", "Subject — Default placement"];
 }
 
 // Which Image Extension controls a product shows.
@@ -703,28 +768,60 @@ function extensionControls(s) {
     };
 }
 
-// Detail lines shown under a product — everything that used to be hidden in
-// hover tooltips (UXP panels don't reliably show them).
-const MAX_WARNINGS = 3;
+// Short status lines under a product name: image status, an error, or a
+// count of other warnings. The full text is in ⋯ More actions.
 function detailLines(rec, state, s) {
     const lines = [];
     if (rec.status !== "matched") {
         lines.push(["detail-muted", rec.notes || "No image matched this row"]);
         return lines;
     }
-    if (rec.imagePath) lines.push(["detail-muted", "Image: " + rec.imagePath.split("/").pop()]);
-    if (state === "unchecked") lines.push(["detail-muted", "Existing .indd found — not checked yet. Preview or commit it."]);
-    if (s && s.error) lines.push(["detail-error", "✗ " + s.error]);
+    if (state === "unchecked") lines.push(["detail-muted", "Existing .indd — not checked yet"]);
+    if (s && s.error) lines.push(["detail-error", "✗ " + String(s.error).split(" — ")[0].slice(0, 80)]);
     const image = s && s.image;
     if (image) lines.push(imageLine(image));
     const warnings = ((s && s.warnings) || []).filter((w) => !(image && IMAGE_WARNING.test(w)));
-    for (const w of warnings.slice(0, MAX_WARNINGS)) lines.push(["detail-warning", "⚠ " + w]);
-    if (warnings.length > MAX_WARNINGS) {
-        lines.push(["detail-warning", `⚠ …and ${warnings.length - MAX_WARNINGS} more (see the log)`]);
-    }
-    if (s && s.exportedAt) lines.push(["detail-muted", "Exported " + shortTime(s.exportedAt)]);
-    else if (s && s.committedAt) lines.push(["detail-muted", "Committed " + shortTime(s.committedAt)]);
+    if (warnings.length) lines.push(["detail-warning", `⚠ ${warnings.length} other warning${warnings.length === 1 ? "" : "s"} — see ⋯`]);
     return lines;
+}
+
+// Short status for the Product actions dialog:
+//   Subject ✓ Detected | Subject — Default placement
+//   Image ↗ Extension available · 5 pages · 4 plans | Image ✓ Extended · 5 pages
+function productStatusLines(s) {
+    const out = [];
+    const subj = subjectLine(s);
+    if (subj) out.push(subj);
+    const image = s && s.image;
+    if (image) {
+        const [cls, text] = imageLine(image);
+        const extendedPages = (image.versions || []).length;
+        const need = pagesNeedingExtension(s);
+        const plans = (image.plans || []).length;
+        let counts = "";
+        if (extendedPages && image.status !== "extension_available") counts = `${extendedPages} page${extendedPages === 1 ? "" : "s"}`;
+        else if (need) counts = `${need} page${need === 1 ? "" : "s"}` + (plans ? ` · ${plans} plan${plans === 1 ? "" : "s"}` : "");
+        out.push([cls, counts ? `${text} · ${counts}` : text]);
+    }
+    return out;
+}
+
+// Page-level details for "View details" (collapsed): readable, without plan
+// ids or pixel numbers — those stay in the logs.
+function productDetailText(rec, p, s) {
+    const out = [p.inddPath.split("/").pop()];
+    if (rec.imagePath) out.push("Photo: " + rec.imagePath.split("/").pop());
+    if (s && s.subject && !s.subject.detected && s.subject.reason) out.push("Subject: " + s.subject.reason);
+    for (const w of ((s && s.warnings) || []).slice(0, 8)) {
+        out.push("• " + String(w)
+            .replace(/\s*—\s*extension required.*$/i, "")
+            .replace(/\s*\(?plan EXT_[0-9a-f]{8}\)?/gi, "")
+            .replace(/[,;]?\s*[+−-]?\d+(\.\d+)?\s*px/gi, ""));
+    }
+    if (s && s.error) out.push("✗ " + s.error);
+    if (s && s.exportedAt) out.push("Exported " + shortTime(s.exportedAt));
+    else if (s && s.committedAt) out.push("Committed " + shortTime(s.committedAt));
+    return out.join("\n");
 }
 
 // The product list: one block per Excel row / photo folder —
@@ -752,15 +849,13 @@ function renderTable() {
         if (rec.status === "matched") {
             const actions = div("product-actions");
             const hasIndd = !!(p && p.exists);
-            if (hasIndd) actions.appendChild(button(LABEL.open, () => openRow(rec), p.inddPath));
-            const preview = button(LABEL.preview, () => previewRow(rec), "Export low-res JPGs of this product and show them");
+            const open = button(LABEL.open, () => openRow(rec), p ? p.inddPath : "");
             const commit = button(LABEL.commit, () => commitRow(rec),
                 "Save + check this .indd and mark it Committed (no JPG export — that's step 4)");
-            preview.disabled = busy || !hasIndd;
+            open.disabled = busy || !hasIndd;
             commit.disabled = busy || !hasIndd;
-            actions.appendChild(preview);
+            actions.appendChild(open);
             actions.appendChild(commit);
-            for (const b of extensionButtons(rec, s, hasIndd)) actions.appendChild(b);
             const more = button(LABEL.more, () => moreMenu(rec), "More actions");
             more.disabled = busy || !p;
             actions.appendChild(more);
@@ -783,19 +878,29 @@ let activeRec = null;
 
 function renderActiveProduct() {
     el.activeActions.innerHTML = "";
+    el.activeStatus.innerHTML = "";
     if (!activeRec || !products.get(activeRec)) {
         el.activeProduct.classList.add("hidden");
         return;
     }
-    el.activeName.textContent = activeRec.headline;
     const rec = activeRec;
-    const preview = button(LABEL.preview, () => previewRow(rec));
-    const commit = button(LABEL.commit, () => commitRow(rec));
-    const more = button(LABEL.more, () => moreMenu(rec), "More actions");
-    commit.disabled = busy;
     const p = products.get(rec);
-    const extButtons = extensionButtons(rec, p ? getStatus(p.inddPath) : null, true);
-    for (const b of [preview, commit].concat(extButtons, [more])) el.activeActions.appendChild(b);
+    const s = getStatus(p.inddPath);
+    el.activeName.textContent = rec.headline;
+    const subj = subjectLine(s);
+    if (subj) el.activeStatus.appendChild(div(subj[0], subj[1]));
+    const c = extensionControls(s);
+    if (s && s.image) {
+        const need = c.extend ? pagesNeedingExtension(s) : 0;
+        el.activeStatus.appendChild(need
+            ? div("detail-warning", `Image ↗ ${need} page${need === 1 ? "" : "s"} need${need === 1 ? "s" : ""} extension`)
+            : div(...imageLine(s.image)));
+    }
+    // Inline: the one image action that applies now; the rest is in ⋯.
+    if (c.extend) el.activeActions.appendChild(button(LABEL.extend, () => productActions(rec))); // prompt + Extend live there
+    if (c.hide) el.activeActions.appendChild(button(LABEL.hide, () => toggleExtension(rec, false), "Turn the extension off to see the original layout"));
+    if (c.show) el.activeActions.appendChild(button(LABEL.show, () => toggleExtension(rec, true)));
+    el.activeActions.appendChild(button(LABEL.more, () => moreMenu(rec), "More actions"));
     el.activeProduct.classList.remove("hidden");
 }
 
@@ -876,6 +981,7 @@ function recordGeneration(result) {
             committedAt: null,
             exportedAt: null,
             image: g.image || null,
+            subject: g.subject || null,
         });
     }
     for (const f of result.failed) {
@@ -1060,37 +1166,16 @@ async function commitRow(rec) {
 // No automatic reuse; every generation is a new version in generated_assets/.
 // Only "Use existing extension" applies stored versions. The result appears
 // on the INDD's extendImage layer; the original Image layer is never changed.
-async function extendRow(rec) {
+//   mode: "extend" (Extend Image) · "regenerate" (Re-extend Image) ·
+//         "use_existing" (Use Existing Extension, no Firefly call)
+//   prompt: optional Firefly prompt, typed in the Product actions dialog
+// No dialog of its own — the choice and the prompt come from productActions().
+async function extendRow(rec, mode, prompt) {
     const p = products.get(rec);
     const s = getStatus(p.inddPath) || {};
-    const image = s.image || {};
-    const existing = EXTENDED.indexOf(image.status) !== -1 || image.status === "extension_hidden" || !!image.extension ||
-        (image.plans || []).some((x) => x.cachedVersion);
-    const previous = image;
-    setStatus(p.inddPath, { image: Object.assign({}, image, { status: "awaiting_user" }) });
-    renderTable();
-    const answer = await showDialog(`Image extension — ${rec.headline}`,
-        existing
-            ? "This product already has an extension.\n\n" +
-              "Use existing: show the stored version (no Firefly call).\n" +
-              "Re-extend: one new Firefly generation for this product, shared by all its pages; old versions are kept."
-            : "The image doesn't cover its frame on " + ((image.text || "").match(/\d+ page/) || ["some page"])[0] + "(s).\n\n" +
-              "Extend: one Firefly generation for this product; every page shows only its own uncovered strip from it, on the extendImage layer. The original image isn't changed.",
-        existing
-            ? [{ label: "Use existing extension", value: "use_existing" }, { label: "Re-extend image", value: "regenerate" }, { label: "Skip", value: "skip" }]
-            : [{ label: "Extend image", value: "extend" }, { label: "Skip", value: "skip" }],
-        { input: { label: "Prompt (optional) — guides what Firefly generates in the new area:",
-            placeholder: "e.g. wet asphalt road, evening light" } });
-    const choice = answer.value;
-    const prompt = answer.text.slice(0, 1024); // Firefly's limit
-    if (!choice) { setStatus(p.inddPath, { image: previous }); renderTable(); return; }
-    if (choice === "skip") {
-        const skipped = EXTENDED.indexOf(previous.status) !== -1 || previous.status === "extension_hidden"
-            ? previous : Object.assign({}, previous, { status: "skipped" });
-        setStatus(p.inddPath, { image: skipped });
-        renderTable();
-        return;
-    }
+    const previous = s.image || {};
+    const choice = mode || "extend";
+    prompt = choice === "use_existing" ? "" : String(prompt || "").slice(0, 1024); // Firefly's limit
     const item = itemFor(rec);
     setBusy(true);
     setStatus(p.inddPath, { image: Object.assign({}, previous, { status: "extending" }) });
@@ -1098,7 +1183,7 @@ async function extendRow(rec) {
     try {
         if (!(await waitForInDesign())) throw new Error(NOT_READY);
         const result = await render.extendProductImage(item, outputEntry.nativePath, choice, progressTo(channels.generate),
-            { prompt: choice === "use_existing" ? "" : prompt });
+            { prompt });
         try {
             await render.writeLog(result.logLines, outputEntry.nativePath + "/image_extension_apply_log.jsonl");
         } catch (e) {}
@@ -1153,12 +1238,9 @@ el.btnExtendAll.addEventListener("click", async () => {
     const rows = extendableRows();
     if (!rows.length) return;
     const answer = await showDialog("Extend All Images",
-        `${rows.length} product(s) have an image that doesn't cover its frame.\n\n` +
-        "Extend All: one Firefly generation per product; every page shows only its own uncovered strip, " +
-        "on the extendImage layer. Original images aren't changed. Products you skipped or already extended are left alone.",
-        [{ label: `Extend ${rows.length} product(s)`, value: "go" }],
-        { input: { label: "Prompt (optional) — used for every product in this run:",
-            placeholder: "e.g. wet asphalt road, evening light" } });
+        `${rows.length} product${rows.length === 1 ? "" : "s"} need${rows.length === 1 ? "s" : ""} image extension.`,
+        [{ label: `Extend ${rows.length} product${rows.length === 1 ? "" : "s"}`, value: "go" }],
+        { input: { label: "Prompt (optional)", placeholder: "e.g. wet asphalt road, evening light" } });
     if (answer.value !== "go") return;
     const prompt = answer.text.slice(0, 1024);
     setBusy(true);
@@ -1225,15 +1307,59 @@ async function toggleExtension(rec, visible) {
     }
 }
 
-async function moreMenu(rec) {
+// ⋯ Product actions — ONE dialog for a product:
+//   status (Subject / Image, short), then the groups that apply now —
+//   IMAGE EXTENSION: optional prompt + Extend / Re-extend / Use Existing /
+//                    Show-Hide (the prompt is read from this dialog; no
+//                    second dialog)
+//   DOCUMENT:        Preview · Regenerate .indd · Open Output Folder
+//   (Image Extension first once an extension exists) and a collapsed
+//   "View details" with page-level information. Plan ids and pixel numbers
+//   stay in the logs.
+async function productActions(rec) {
     const p = products.get(rec);
-    const choice = await showDialog(rec.headline, p.inddPath.split("/").pop(), [
-        { label: p.exists ? "Regenerate .indd" : "Generate .indd", value: "regenerate", danger: p.exists },
-        { label: "Open Output Folder", value: "output" },
-    ]);
+    const s = getStatus(p.inddPath);
+    const c = extensionControls(s);
+    const image = (s && s.image) || {};
+    const stored = (image.plans || []).some((x) => x.cachedVersion) || EXTENDED.indexOf(image.status) !== -1 ||
+        image.status === "extension_hidden" || !!image.extension;
+    const doc = [{ header: "Document" }];
+    if (p.exists) doc.push({ label: "Preview", value: "preview" });
+    doc.push({ label: p.exists ? "Regenerate .indd" : "Generate .indd", value: "regenerate", danger: p.exists });
+    doc.push({ label: "Open Output Folder", value: "output" });
+    const ext = [];
+    if (p.exists && s && s.image) {
+        const firefly = [];
+        if (c.extend) firefly.push({ label: LABEL.extend, value: "extend" });
+        if (stored && !c.extend) firefly.push({ label: LABEL.reextend, value: "reextend" });
+        const other = [];
+        if (stored) other.push({ label: LABEL.useExisting, value: "use_existing" });
+        if (c.hide) other.push({ label: LABEL.hide, value: "hide" });
+        if (c.show) other.push({ label: LABEL.show, value: "show" });
+        if (firefly.length || other.length) {
+            ext.push({ header: "Image extension" });
+            if (firefly.length) ext.push({ prompt: { label: "Prompt (optional)", placeholder: "e.g. wet asphalt road, evening light" } }, ...firefly);
+            ext.push(...other);
+        }
+    }
+    const status = productStatusLines(s);
+    const entries = (status.length ? [{ status }] : [])
+        .concat(stored && ext.length ? ext.concat(doc) : doc.concat(ext))
+        .concat([{ details: productDetailText(rec, p, s) }]);
+    const answer = await showDialog(rec.headline, "", entries, { withText: true, closeLabel: stored ? "Close" : "Cancel" });
+    const choice = answer.value;
+    if (choice === "preview") await previewRow(rec);
     if (choice === "regenerate") await regenerateRow(rec);
     if (choice === "output") await openOutputFolder(p.subType);
+    if (choice === "extend") await extendRow(rec, "extend", answer.text);
+    if (choice === "reextend") await extendRow(rec, "regenerate", answer.text);
+    if (choice === "use_existing") await extendRow(rec, "use_existing");
+    if (choice === "hide") await toggleExtension(rec, false);
+    if (choice === "show") await toggleExtension(rec, true);
 }
+
+// Kept name for the ⋯ buttons.
+const moreMenu = productActions;
 
 // Rebuilds ONE product's INDD, then opens it ("jumps" to it) in InDesign.
 // An INDD that's open is closed WITHOUT saving — only after the user
