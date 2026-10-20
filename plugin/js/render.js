@@ -1516,7 +1516,9 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                 const warnings = result.reports.filter((r) => /^WARNING /.test(r)).concat(image.warnings);
                 run.success(headline, label, inddPath, "populated + validated" +
                     (warnings.length ? ` (${warnings.length} warning(s))` : ""));
-                generated.push({ rec, subType: t.subType, inddPath, warnings, image: image.summary });
+                generated.push({ rec, subType: t.subType, inddPath, warnings, image: image.summary,
+                    // for the panel's status line only (Subject ✓ Detected / — Default placement)
+                    subject: subject ? { detected: !!subject.box, reason: subject.box ? "" : (subject.reason || "") } : null });
             } catch (e) {
                 // Nothing saved for this product + template.
                 fail(e);

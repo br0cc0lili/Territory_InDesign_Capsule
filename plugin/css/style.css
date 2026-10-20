@@ -291,6 +291,49 @@ dialog {
     font-size: 12px;
 }
 
+/* ⋯ More actions: a small heading per group (DOCUMENT, IMAGE EXTENSION). */
+.dialog-group {
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #9aa3b5;
+    margin: 6px 0 4px;
+}
+
+/* Product actions: short status lines, inline prompt, collapsed details. */
+.dialog-status {
+    font-size: 12px;
+    margin: 0 0 3px;
+}
+
+.dialog-status.detail-muted { color: #ccc; }
+
+.dialog-buttons .dialog-input-label {
+    margin-top: 2px;
+}
+
+.dialog-buttons .dialog-input-text {
+    height: 44px;
+    margin: 0 0 6px;
+}
+
+.dialog-buttons button.dialog-details-toggle {
+    background: transparent;
+    border: none;
+    color: #9aa3b5;
+    font-size: 11px;
+    text-align: left;
+    padding: 4px 0;
+}
+
+.dialog-details {
+    font-size: 11px;
+    color: #aaa;
+    white-space: pre-line;
+    word-wrap: break-word;
+    margin: 0 0 6px;
+}
+
 .dialog-buttons {
     display: flex;
     flex-direction: column;
@@ -333,33 +376,67 @@ body {
 }
 
 #footer-bar .batch-bar {
-    margin-top: 0;
+    margin: 0 0 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #4a4a4a;
 }
 
-/* "Working in: <product>  [Preview] [Commit] [⋯]" */
-.active-product {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    font-size: 11px;
-    padding: 6px 8px;
+/* Current product: the product INDD that is InDesign's front document —
+   below the product list, outside its scroll area. */
+.current-product {
     margin-bottom: 8px;
+    padding: 6px 10px;
     background: #3a3f4a;
     border-radius: 3px;
 }
 
-.active-product.hidden {
+.current-product.hidden {
     display: none;
 }
 
-.active-caption {
-    color: #aaa;
-    margin-right: 4px;
+/* "CURRENT PRODUCT  Aerowischer" on one line, the statuses on the next. */
+.current-head {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
 }
 
-.active-name {
-    font-weight: bold;
+.current-caption {
+    flex-shrink: 0;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #9aa3b5;
     margin-right: 8px;
+}
+
+.current-name {
+    font-weight: bold;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.current-status {
+    display: flex;
+    flex-wrap: wrap;
+    margin-top: 2px;
+}
+
+.current-status div {
+    font-size: 11px;
+    margin-right: 12px;
+}
+
+.current-actions {
+    display: flex;
+    flex-wrap: wrap;
+    margin-top: 5px;
+}
+
+.current-actions button {
+    margin: 0 6px 0 0;
 }
 
 tr.row-active td {
@@ -428,6 +505,48 @@ tr.row-active td {
 
 .product-list {
     margin-top: 10px;
+    /* The list scrolls on its own and takes the height that is left in the
+       panel (flex, see #main below): steps 1–3 stay in view, the current
+       product, batch actions and Export stay in the footer. It never gets
+       shorter than ~3 rows (then the whole panel scrolls instead), is only as
+       tall as its rows when there are few, and its scrollbar only appears
+       when the rows don't fit. */
+    flex: 0 1 auto;
+    min-height: 320px;
+    overflow-y: auto;
+    border-top: 1px solid #4a4a4a;
+    border-bottom: 1px solid #4a4a4a;
+}
+
+.product-list:empty {
+    min-height: 0;
+    border: none;
+}
+
+/* #main is a column; only step 3 can shrink, and inside it only the list. */
+#main {
+    display: flex;
+    flex-direction: column;
+}
+
+#main > * {
+    flex: 0 0 auto;
+}
+
+#main > .step-last {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 0;
+}
+
+#main > .step-last > * {
+    flex: 0 0 auto;
+}
+
+#main > .step-last > .product-list {
+    flex: 0 1 auto;
 }
 
 .product-row {
