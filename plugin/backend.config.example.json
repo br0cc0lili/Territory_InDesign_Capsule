@@ -4,5 +4,6 @@
     "pluginKey": "<same value as PLUGIN_SHARED_KEY in territory-app/.env — a prototype request gate, NOT a secret>",
     "maxPlansPerRun": null,
     "onlyPlanId": null,
-    "batchMode": "consistent"
+    "batchMode": "consistent",
+    "subjectDetection": true
 }

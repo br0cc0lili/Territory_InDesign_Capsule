@@ -25,7 +25,10 @@ fs.writeFileSync(out,fs.readFileSync(tpl,"utf8").replace("__ROOT__",root).replac
 ' "$D/prelude.js" "$OUT/prelude.js" "$ROOT" "$OUT" "$REPO" "$CONFIG" || exit 2
 run() {
   local step=$1 body=$2
-  { cat "$OUT/prelude.js"; echo "const __out = {};"; echo "try {"; cat "$body"; echo "} catch (e) { __out.error = String(e && e.stack || e); }"; echo "await writeOut('$step.json', __out);"; } > "$OUT/$step.idjs"
+  # Dialogs (e.g. InDesign's "Issues with Links") are suppressed for the test
+# only — NEVER_INTERACT leaves modified links as they are ("Don't Update
+# Links") — and the user's setting is restored in finally.
+  { cat "$OUT/prelude.js"; echo "const __out = {};"; echo "const __uil = app.scriptPreferences.userInteractionLevel;"; echo "try {"; echo "app.scriptPreferences.userInteractionLevel = require('indesign').UserInteractionLevels.NEVER_INTERACT;"; cat "$body"; echo "} catch (e) { __out.error = String(e && e.stack || e); } finally { app.scriptPreferences.userInteractionLevel = __uil; }"; echo "await writeOut('$step.json', __out);"; } > "$OUT/$step.idjs"
   rm -f "$OUT/$step.json"
   osascript -e 'with timeout of 900 seconds' -e "tell application id \"com.adobe.InDesign\" to do script \"app.doScript(File('$OUT/$step.idjs'), ScriptLanguage.UXPSCRIPT); 'ok'\" language javascript" -e 'end timeout' >/dev/null 2>&1
   for i in {1..600}; do [ -f "$OUT/$step.json" ] && break; sleep 1; done
