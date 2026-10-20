@@ -39,6 +39,21 @@ const PLACEMENT_CONFIG = {
     // otherwise → "fill" (more new image than original — a new composition,
     // not an extension). Keep maxExtensionRatio in line with Image
     // Extension's own limit (imageextension.js CONFIG.maxExtensionRatio).
+    // Subject (bounding box from subject.js): in "extend" layouts the original
+    // keeps its contain-fit scale and is shifted along the axis that has a
+    // gap so the subject's centre sits in the middle of the FREE band — the
+    // frame minus the page's text frames (headline / footer overlay), so the
+    // subject isn't pushed under the text — clamped so the original stays
+    // inside the frame (never cropped; the remaining gap is filled by Image
+    // Extension). No free band → the frame's centre. Without a box: the
+    // anchor, as before.
+    // Fill layouts are unaffected (placeImageFill / content-aware fit).
+    // A box spanning (nearly) the whole photo on an axis carries no position
+    // information there (e.g. remove-background kept the whole scene) — no
+    // shift on that axis.
+    // minFreeShare: a free band smaller than this share of the frame is
+    // ignored (the frame's centre is used instead).
+    subject: { centerInExtendLayouts: true, maxInformativeSpan: 0.95, minFreeShare: 0.25 },
     fallback: {
         maxExtensionRatio: 0.5,
         verticalGapAnchor: { vertical: "top", horizontal: "center" },
@@ -126,18 +141,47 @@ function probeSourceSize(frame, imagePath) {
     return { width: g.width, height: g.height };
 }
 
+// A usable subject box ({x, y, width, height} shares of the photo), or null.
+function validSubjectBox(b) {
+    if (!b) return null;
+    const n = [b.x, b.y, b.width, b.height].map(Number);
+    if (!n.every(isFinite) || n[2] <= 0 || n[3] <= 0 || n[0] < 0 || n[1] < 0 || n[0] + n[2] > 1.0001 || n[1] + n[3] > 1.0001) return null;
+    return { x: n[0], y: n[1], width: n[2], height: n[3] };
+}
+
 // PURE. Where the graphic should go inside the frame for a policy.
 //   frameBounds: [top, left, bottom, right]
 //   sourceSize: { width, height } — any unit, only the aspect ratio matters
 //   policy: from getLayoutPolicy()
-//   subjectBounds: reserved for a subject/content bounding box
-//                  ({x, y, width, height} in source px) — null for now and
-//                  ignored; the bounding-box system replaces this stage.
-// Returns { mode, anchor, graphicBounds, subjectBounds } — graphicBounds is
-// null for "fill" (that mode is render.js placeImageFill()'s own fitting).
-// "extend": uniform scale so the WHOLE image fits (contain), then aligned by
-// the anchor — aspect exact, nothing cropped or stretched.
-function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = null }) {
+//   subjectBounds: the main subject's box as shares (0..1) of the photo
+//                  ({ x, y, width, height } from subject.js) or null. In
+//                  "extend" mode it re-centres the image on the subject
+//                  (PLACEMENT_CONFIG.subject); null = anchor only, as before.
+// Returns { mode, anchor, graphicBounds, subjectBounds, subjectShift } —
+// graphicBounds is null for "fill" (that mode is render.js placeImageFill()'s
+// own fitting). "extend": uniform scale so the WHOLE image fits (contain),
+// aligned by the anchor, then (with a subject box) shifted on the gap axis to
+// centre the subject — aspect exact, nothing cropped or stretched.
+// PURE. The largest stretch of [lo, hi] not covered by any of `blocked`
+// ([a, b] intervals), or null if nothing usable (≥ minShare of the axis) is left.
+function largestFreeInterval(lo, hi, blocked, minShare) {
+    let free = [[lo, hi]];
+    for (const [a, b] of blocked) {
+        free = free.reduce((acc, [x, y]) => {
+            if (b <= x || a >= y) return acc.concat([[x, y]]);
+            const out = [];
+            if (a > x) out.push([x, a]);
+            if (b < y) out.push([b, y]);
+            return acc.concat(out);
+        }, []);
+    }
+    const best = free.reduce((m, iv) => (!m || iv[1] - iv[0] > m[1] - m[0] ? iv : m), null);
+    return best && best[1] - best[0] >= (hi - lo) * (minShare || 0) ? best : null;
+}
+
+//   avoidBounds: [[t, l, b, r], …] page items the subject should stay clear
+//                of (render.js: the text frames over the image) — optional
+function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = null, avoidBounds = null }) {
     if (policy.placementMode !== "extend") {
         return { mode: policy.placementMode, anchor: null, graphicBounds: null, subjectBounds };
     }
@@ -146,13 +190,30 @@ function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = n
     const scale = Math.min(f.width / sourceSize.width, f.height / sourceSize.height);
     const w = sourceSize.width * scale;
     const h = sourceSize.height * scale;
-    const left = a.horizontal === "left" ? f.left
+    let left = a.horizontal === "left" ? f.left
         : a.horizontal === "right" ? f.right - w
         : f.left + (f.width - w) / 2;
-    const top = a.vertical === "top" ? f.top
+    let top = a.vertical === "top" ? f.top
         : a.vertical === "bottom" ? f.bottom - h
         : f.top + (f.height - h) / 2;
-    return { mode: "extend", anchor: a, graphicBounds: [top, left, top + h, left + w], subjectBounds };
+    let subjectShift = null;
+    const sb = validSubjectBox(subjectBounds);
+    if (sb && PLACEMENT_CONFIG.subject.centerInExtendLayouts) {
+        const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+        const before = { left, top };
+        // only along an axis with a gap — the image never leaves the frame
+        const span = PLACEMENT_CONFIG.subject.maxInformativeSpan;
+        // Free band per axis: the frame minus the text frames that overlap it.
+        const overl = (avoidBounds || []).map(toBox).filter((o) => o.right > f.left && o.left < f.right && o.bottom > f.top && o.top < f.bottom);
+        const minShare = PLACEMENT_CONFIG.subject.minFreeShare;
+        const freeY = largestFreeInterval(f.top, f.bottom, overl.map((o) => [o.top, o.bottom]), minShare) || [f.top, f.bottom];
+        const freeX = largestFreeInterval(f.left, f.right, overl.map((o) => [o.left, o.right]), minShare) || [f.left, f.right];
+        if (f.width - w > 0.01 && sb.width < span) left = clamp((freeX[0] + freeX[1]) / 2 - (sb.x + sb.width / 2) * w, f.left, f.right - w);
+        if (f.height - h > 0.01 && sb.height < span) top = clamp((freeY[0] + freeY[1]) / 2 - (sb.y + sb.height / 2) * h, f.top, f.bottom - h);
+        subjectShift = { dx: Math.round((left - before.left) * 100) / 100, dy: Math.round((top - before.top) * 100) / 100,
+            freeBand: { y: freeY.map((v) => Math.round(v * 10) / 10), x: freeX.map((v) => Math.round(v * 10) / 10) } };
+    }
+    return { mode: "extend", anchor: a, graphicBounds: [top, left, top + h, left + w], subjectBounds: sb, subjectShift };
 }
 
 // Moves/scales the placed graphic to the plan's bounds. Proportional by
@@ -167,7 +228,9 @@ function applyImagePlacement(graphic, placementPlan) {
 // also covers InDesign versions where the fit call fails.
 //   id: the require("indesign") module (FitOptions); policy: getLayoutPolicy()
 // Returns { note, placementPlan }.
-function placeImageForExtension(frame, imagePath, id, policy) {
+//   subjectBounds: optional subject box (subject.js) — see planImagePlacement
+//   avoidBounds: optional text-frame bounds the subject should stay clear of
+function placeImageForExtension(frame, imagePath, id, policy, subjectBounds, avoidBounds) {
     frame.place(imagePath);
     let fitNote = "fit=proportional";
     try {
@@ -183,17 +246,20 @@ function placeImageForExtension(frame, imagePath, id, policy) {
         frameBounds: frame.geometricBounds,
         sourceSize: { width: g.width, height: g.height }, // freshly placed: source aspect
         policy,
-        subjectBounds: null,
+        subjectBounds: subjectBounds || null,
+        avoidBounds: avoidBounds || null,
     });
     applyImagePlacement(graphic, placementPlan);
     return {
         note: `placement=extend (${fitNote}; policy ${policy.id}; anchor ${policy.anchor.vertical}/${policy.anchor.horizontal}` +
-            (policy.gap ? `; ${policy.gap.axis} gap ${Math.round(policy.gap.ratio * 100)}%` : "") + ")",
+            (policy.gap ? `; ${policy.gap.axis} gap ${Math.round(policy.gap.ratio * 100)}%` : "") +
+            (placementPlan.subjectShift ? `; subject-centred in free band y ${placementPlan.subjectShift.freeBand.y.join("–")}` +
+                ` dx ${placementPlan.subjectShift.dx} dy ${placementPlan.subjectShift.dy}` : "") + ")",
         placementPlan,
     };
 }
 
 module.exports = {
-    PLACEMENT_CONFIG, getLayoutPolicy, geometryFallbackPolicy, resolvePlacementPolicy, probeSourceSize,
+    PLACEMENT_CONFIG, validSubjectBox, largestFreeInterval, getLayoutPolicy, geometryFallbackPolicy, resolvePlacementPolicy, probeSourceSize,
     planImagePlacement, applyImagePlacement, placeImageForExtension,
 };

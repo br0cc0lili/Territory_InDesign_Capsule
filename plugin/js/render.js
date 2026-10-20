@@ -290,6 +290,20 @@ function imageExt() {
     throw new Error("Could not load imageextension.js (" + errors.join("; ") + ")");
 }
 
+// Subject detection (subject.js, bounding box for the placement stage) —
+// loaded the same way; if it can't load, placement simply runs without it.
+let _subject = null;
+function subjectModule() {
+    if (_subject) return _subject;
+    for (const path of ["./subject.js", "./js/subject.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.createSubjectDetector === "function") return (_subject = mod);
+        } catch (e) {}
+    }
+    return null;
+}
+
 // Placement stage (placement.js) — loaded the same way. Swappable: a
 // bounding-box placement system replaces this module; Image Extension never
 // calls it.
@@ -822,7 +836,11 @@ function placeImageFill(frame, imagePath) {
 // Returns the placement contract Image Extension relies on:
 //   { mode, allowExtension, policy, note }
 // (a future bounding-box placement only has to return the same shape).
-function placeProductImage(frame, imagePath, layout) {
+//   subjectBox: the photo's subject box from subject.js (shares 0..1) or
+//               null — used by "extend" placement only; null = as before
+//   avoidBounds: bounds of the page's text frames (headline / footer) — with a
+//               subject box, the subject is centred in the area outside them
+function placeProductImage(frame, imagePath, layout, subjectBox, avoidBounds) {
     let placement = null;
     try { placement = placementModule(); } catch (e) {
         return { mode: "fill", allowExtension: false, policy: { id: "fallback", placementMode: "fill", anchor: null },
@@ -840,7 +858,8 @@ function placeProductImage(frame, imagePath, layout) {
     }
     if (policy.placementMode === "extend") {
         return { mode: "extend", allowExtension: true, policy,
-            note: placement.placeImageForExtension(frame, imagePath, indesign(), policy).note };
+            subject: subjectBox || null,
+            note: placement.placeImageForExtension(frame, imagePath, indesign(), policy, subjectBox || null, avoidBounds || null).note };
     }
     return { mode: "fill", allowExtension: false, policy, note: placeImageFill(frame, imagePath) + ` (policy ${policy.id}` +
         (policy.gap ? `; ${policy.gap.axis} gap ${Math.round(policy.gap.ratio * 100)}% > limit` : "") + ")" };
@@ -857,6 +876,7 @@ function writePlacementLabel(frame, placed) {
             mode: placed.mode, allowExtension: placed.allowExtension === true,
             policy: placed.policy && placed.policy.id, anchor: (placed.policy && placed.policy.anchor) || null,
             known: !!(placed.policy && placed.policy.known), gap: (placed.policy && placed.policy.gap) || null,
+            subject: placed.subject || null,
         }));
     } catch (e) {}
 }
@@ -1096,7 +1116,8 @@ function validatePage(page, layout, rec, subline) {
 // subline, footer), detach Data Merge, validate every page.
 // Returns { plan, reports: string[], errors: string[] } — the caller only
 // saves and exports when errors is empty.
-function populateDocument(doc, t, rec) {
+//   subject: optional subject detection result for rec.imagePath ({ box } from subject.js)
+function populateDocument(doc, t, rec, subject) {
     const errors = [];
     const reports = [];
     const subline = sublineFor(rec, t.subType); // null = keep the template's subline text
@@ -1153,7 +1174,10 @@ function populateDocument(doc, t, rec) {
             const footerDiag = footerFrame ? setFooterText(doc, footerFrame, rec.danis_addon || "") : "";
             const imageFrame = findImageFrame(page);
             if (!imageFrame) throw new Error(`no ${FRAME_NAMES.image} frame`);
-            const placed = placeProductImage(imageFrame, rec.imagePath, pg.layout);
+            // Text over the image (headline / footer): a subject is centred outside it.
+            const avoid = [findHeadlineFrame(page), footerFrame].filter(Boolean)
+                .map((f) => Array.from(f.geometricBounds, Number));
+            const placed = placeProductImage(imageFrame, rec.imagePath, pg.layout, subject && subject.box, avoid);
             pg.fitNote = placed.note;
             pg.placement = placed;
             writePlacementLabel(imageFrame, placed);
@@ -1424,9 +1448,26 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
     // expansion and working request) are shared — one Firefly call each.
     let planRegistry = null;
     try { planRegistry = imageExt().createPlanRegistry(); } catch (e) {}
+    // Subject detection (bounding box → placement.js), once per photo. Off or
+    // failing → no box → placement exactly as without it; never blocks Generate.
+    let subjectDetector = null;
+    try {
+        const mod = subjectModule();
+        if (mod) {
+            const sc = await mod.loadSubjectConfig();
+            subjectDetector = mod.createSubjectDetector(sc.config, sc.reason);
+        }
+    } catch (e) {}
     const usedIndd = new Set();
     for (const rec of matchedRows) {
         const headline = rec.headline;
+        let subject = null;
+        if (subjectDetector && subjectDetector.enabled && rec.imagePath) {
+            subject = await subjectDetector.detect(rec.imagePath);
+            run.line(headline, "subject", rec.imagePath, "info", subject.box
+                ? `subject box x ${subject.box.x} y ${subject.box.y} w ${subject.box.width} h ${subject.box.height} (${subject.source}, ${subject.seconds}s)`
+                : `no subject box — placement without it (${subject.reason})`);
+        }
         for (const t of templates) {
             const inddName = uniqueName(buildInddFileName(rec, t.subType), usedIndd);
             const inddPath = inddFolder[t.subType] + "/" + inddName;
@@ -1458,7 +1499,7 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                 usePoints(doc);
                 unlockAll(doc);
 
-                const result = populateDocument(doc, t, rec);
+                const result = populateDocument(doc, t, rec, subject);
                 for (const r of result.reports) run.line(headline, `${t.name} check`, "", "info", r);
                 if (result.errors.length) {
                     throw new Error("not saved — " + result.errors.join(" / "));
