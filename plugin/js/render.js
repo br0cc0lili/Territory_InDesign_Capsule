@@ -304,6 +304,25 @@ function subjectModule() {
     return null;
 }
 
+// Red subject frame (subjectzone.js) — loaded the same way; if it can't
+// load, pages simply have no zone.
+let _zone = null;
+function zoneModule() {
+    if (_zone) return _zone;
+    for (const path of ["./subjectzone.js", "./js/subjectzone.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.zoneForPage === "function") return (_zone = mod);
+        } catch (e) {}
+    }
+    return null;
+}
+
+function zoneForPage(page) {
+    const mod = zoneModule();
+    try { return mod ? mod.zoneForPage(page) : null; } catch (e) { return null; }
+}
+
 // Placement stage (placement.js) — loaded the same way. Swappable: a
 // bounding-box placement system replaces this module; Image Extension never
 // calls it.
@@ -445,6 +464,10 @@ function describePage(page, index, subType) {
     }
     d.key = `${subType}_${d.position}`;
     d.generatable = true;
+    // Red subject frame: read fresh from the page every time (never stored).
+    const zone = zoneForPage(page);
+    d.zone = zone ? { bounds: zone.bounds, via: zone.via, count: zone.count } : null;
+    if (zone && zone.count > 1) d.notes.push(`${where}: ${zone.count} red subject frames — the largest is used`);
     try {
         d.known = placementModule().getLayoutPolicy({ subType, size: d.size, position: d.position }).known;
     } catch (e) {}
@@ -501,8 +524,10 @@ function planPages(doc, subType) {
 // "✓ Template detected: 3 valid layouts (1200x1200 up, 800x600 bottom, 400x500 up)"
 function describeTemplateLayouts(plan) {
     const n = plan.pages.length;
+    const zones = plan.pages.filter((pg) => pg.descriptor && pg.descriptor.zone).length;
     return `✓ Template detected: ${n} valid layout${n === 1 ? "" : "s"}` +
-        (n ? ` (${plan.pages.map((pg) => `${pg.layout.size} ${pg.layout.position}`).join(", ")})` : "");
+        (n ? ` (${plan.pages.map((pg) => `${pg.layout.size} ${pg.layout.position}${pg.descriptor && pg.descriptor.zone ? " ▣" : ""}`).join(", ")})` : "") +
+        (n ? `\n${zones ? "▣" : "·"} Red subject frame on ${zones} of ${n} layout${n === 1 ? "" : "s"}` : "");
 }
 
 // ---------- text replacement ----------
@@ -840,7 +865,10 @@ function placeImageFill(frame, imagePath) {
 //               null — used by "extend" placement only; null = as before
 //   avoidBounds: bounds of the page's text frames (headline / footer) — with a
 //               subject box, the subject is centred in the area outside them
-function placeProductImage(frame, imagePath, layout, subjectBox, avoidBounds) {
+//   zoneBounds: the page's red subject frame (subjectzone.js) or null — with a
+//               subject box, the subject is placed inside it (placement.js
+//               planZonePlacement); result.zone / result.warnings then set
+function placeProductImage(frame, imagePath, layout, subjectBox, avoidBounds, zoneBounds) {
     let placement = null;
     try { placement = placementModule(); } catch (e) {
         return { mode: "fill", allowExtension: false, policy: { id: "fallback", placementMode: "fill", anchor: null },
@@ -855,6 +883,17 @@ function placeProductImage(frame, imagePath, layout, subjectBox, avoidBounds) {
         } catch (e) {
             policy = Object.assign({}, policy, { id: "unknown (geometry unavailable — default policy)" });
         }
+    }
+    if (zoneBounds && subjectBox && typeof placement.placeImageInZone === "function") {
+        const inZone = placement.placeImageInZone(frame, imagePath, policy, subjectBox, zoneBounds);
+        if (inZone) {
+            const plan = inZone.placementPlan;
+            return { mode: plan.mode, allowExtension: plan.mode === "extend", policy, subject: subjectBox, zone: plan.zoneRect,
+                note: inZone.note, warnings: plan.warnings, notes: plan.notes };
+        }
+        // Zone outside the image frame: normal placement below, but say so.
+        const normal = placeProductImage(frame, imagePath, layout, subjectBox, avoidBounds, null);
+        return Object.assign(normal, { warnings: (normal.warnings || []).concat(["the red subject frame lies outside the image frame — normal placement used"]) });
     }
     if (policy.placementMode === "extend") {
         return { mode: "extend", allowExtension: true, policy,
@@ -876,7 +915,7 @@ function writePlacementLabel(frame, placed) {
             mode: placed.mode, allowExtension: placed.allowExtension === true,
             policy: placed.policy && placed.policy.id, anchor: (placed.policy && placed.policy.anchor) || null,
             known: !!(placed.policy && placed.policy.known), gap: (placed.policy && placed.policy.gap) || null,
-            subject: placed.subject || null,
+            subject: placed.subject || null, zone: placed.zone || null,
         }));
     } catch (e) {}
 }
@@ -1117,7 +1156,12 @@ function validatePage(page, layout, rec, subline) {
 // Returns { plan, reports: string[], errors: string[] } — the caller only
 // saves and exports when errors is empty.
 //   subject: optional subject detection result for rec.imagePath ({ box } from subject.js)
-function populateDocument(doc, t, rec, subject) {
+//   options.placementMode: "auto" (default) — the subject is centred in the
+//     free area clear of the text; red subject frames in the template are
+//     ignored. "frames" — Custom Subject Frames: each page's red frame decides
+//     where (and how big) the subject goes; pages without one use "auto".
+function populateDocument(doc, t, rec, subject, options) {
+    const framesMode = !!(options && options.placementMode === "frames");
     const errors = [];
     const reports = [];
     const subline = sublineFor(rec, t.subType); // null = keep the template's subline text
@@ -1177,7 +1221,29 @@ function populateDocument(doc, t, rec, subject) {
             // Text over the image (headline / footer): a subject is centred outside it.
             const avoid = [findHeadlineFrame(page), footerFrame].filter(Boolean)
                 .map((f) => Array.from(f.geometricBounds, Number));
-            const placed = placeProductImage(imageFrame, rec.imagePath, pg.layout, subject && subject.box, avoid);
+            // Red subject frame (read fresh from this page) — Custom Subject
+            // Frames only. Used with a real subject box: a chosen one, or a
+            // detected one that doesn't just cover the whole photo.
+            const zone = framesMode ? (pg.descriptor && pg.descriptor.zone) : null;
+            const usableBox = subject && subject.box && (subject.source === "chosen" || !subject.wholePhoto) ? subject.box : null;
+            if (framesMode && !(pg.descriptor && pg.descriptor.zone)) {
+                reports.push(`${where} subject: no red subject frame on this layout — Auto Placement used`);
+            }
+            if (zone && subject && subject.box && !usableBox) {
+                reports.push(`WARNING ${where}: the detected subject covers the whole photo (busy image), so the red subject frame was not used — ` +
+                    "position the image by hand in this INDD if needed, then Commit");
+            } else if (zone && !(subject && subject.box)) {
+                // Detection switched off / not configured: a note, not a Review
+                // warning (else every product would land in Review). A failed
+                // detection is a warning.
+                const reason = subject && subject.reason ? String(subject.reason).replace(/,/g, ";") : "subject detection off";
+                const off = !subject || /\b(off|disabled|not configured|missing)\b/i.test(reason);
+                reports.push(`${off ? "" : "WARNING "}${where}: red subject frame not used — no subject found (${reason})`);
+            }
+            const placed = placeProductImage(imageFrame, rec.imagePath, pg.layout, usableBox || (subject && subject.box),
+                avoid, zone && usableBox ? zone.bounds : null);
+            for (const w of placed.warnings || []) reports.push(`WARNING ${where}: ${w}`);
+            for (const n of placed.notes || []) reports.push(`${where} subject: ${n}`);
             pg.fitNote = placed.note;
             pg.placement = placed;
             writePlacementLabel(imageFrame, placed);
@@ -1189,6 +1255,17 @@ function populateDocument(doc, t, rec, subject) {
         }
     }
     if (errors.length) return { plan, reports, errors };
+
+    // The red subject frames are guides only: never in a product INDD / JPG.
+    try {
+        const zm = zoneModule();
+        if (zm) {
+            const z = zm.removeSubjectZones(doc);
+            if (z.removed || z.hidden) reports.push(`red subject frame(s): ${z.removed} removed${z.hidden ? `, ${z.hidden} hidden` : ""}`);
+        }
+    } catch (e) {
+        reports.push(`WARNING red subject frame could not be removed (${String(e).replace(/,/g, ";")}) — check the JPG`);
+    }
 
     detachDataMerge(doc);
 
@@ -1263,7 +1340,13 @@ async function checkDocumentImages(doc, plan, ctx, registry, outputRoot) {
     for (const r of toExtend) {
         if (!plans.some((p) => p.id === r.plan.id)) plans.push({ id: r.plan.id, cachedVersion: r.cachedVersion || null });
     }
+    // Over the automatic limit only (soft limits): Extend Image stays
+    // available by hand, after a warning in the panel.
+    const review = records.filter((r) => r.status === "needs_review");
+    const overridable = review.length > 0 && worst.status === "needs_review" && review.every((r) => r.overridable);
     const summary = {
+        overridable,
+        maxRatio: overridable ? Math.max(...review.map((r) => (r.plan && r.plan.ratio && r.plan.ratio.max) || 0)) : 0,
         status: worst.status === "extension_required" ? "extension_available" : worst.status,
         text: worst.status === "not_required" ? "Image covers its frame on every page"
             : worst.status === "extension_required"
@@ -1424,9 +1507,29 @@ function inddPathFor(rec, templatePath, outputRootPath) {
 // placeholder frame could be lost before the INDD was saved. The
 // placeholders are now unbound first, and every page is checked for a
 // placed image before saving.
-async function generateIndds(manifestRows, templatePaths, outputRootPath, onProgress) {
+//   options.placementMode: "auto" | "frames" — see populateDocument(). With
+//   "frames", a template that is open in InDesign with unsaved changes (the
+//   designer just moved a red frame) is saved first, because Generate reads
+//   the template from disk.
+async function generateIndds(manifestRows, templatePaths, outputRootPath, onProgress, options) {
     if (!templatePaths || !templatePaths.length) {
         throw new Error("No templates — prepare the client template in step 2 first.");
+    }
+    const placementMode = options && options.placementMode === "frames" ? "frames" : "auto";
+    const savedTemplates = [];
+    if (placementMode === "frames") {
+        for (const tp of templatePaths) {
+            const open = findOpenTemplate(tp) || findOpenDocument(tp);
+            let modified = false;
+            try { modified = !!(open && open.modified); } catch (e) {}
+            if (modified) {
+                // Generate reads the template from disk: without this save the
+                // moved red frames would be silently ignored — so stop instead.
+                try { await saveWhenIdle(open); savedTemplates.push(basename(tp)); } catch (e) {
+                    throw new Error(`Couldn't save your changes in ${basename(tp)} (${e}) — save the template yourself (Cmd+S), then generate again.`);
+                }
+            }
+        }
     }
     const templates = await inspectTemplates(templatePaths);
     const root = outputRootPath.replace(/\/+$/, "");
@@ -1439,6 +1542,9 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
         run.line("", `${t.name} layouts`, "", "info", `${t.detected} — ${t.mapping}`);
         for (const n of t.notes) run.line("", `${t.name} layouts`, "", "info", n);
     }
+    run.line("", "subject placement", "", "info", placementMode === "frames"
+        ? "Custom Subject Frames (red frames in the template)" : "Auto Placement (centred, clear of the text)");
+    for (const name of savedTemplates) run.line("", "subject placement", "", "info", `saved unsaved changes in ${name} first`);
 
     const generated = [];
     const failed = [];
@@ -1455,17 +1561,25 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
         const mod = subjectModule();
         if (mod) {
             const sc = await mod.loadSubjectConfig();
-            subjectDetector = mod.createSubjectDetector(sc.config, sc.reason);
+            // Objects the designer picked per photo (⋯ → Choose Subject),
+            // stored in <output>/subject_choices.json.
+            let choices = null;
+            if (options && options.useChoices && typeof mod.loadSubjectChoices === "function") {
+                try { choices = await mod.loadSubjectChoices(root); } catch (e) {}
+            }
+            subjectDetector = mod.createSubjectDetector(sc.config, sc.reason, choices);
         }
     } catch (e) {}
     const usedIndd = new Set();
     for (const rec of matchedRows) {
         const headline = rec.headline;
         let subject = null;
-        if (subjectDetector && subjectDetector.enabled && rec.imagePath) {
+        if (subjectDetector && (subjectDetector.enabled || subjectDetector.hasChoices) && rec.imagePath) {
             subject = await subjectDetector.detect(rec.imagePath);
             run.line(headline, "subject", rec.imagePath, "info", subject.box
-                ? `subject box x ${subject.box.x} y ${subject.box.y} w ${subject.box.width} h ${subject.box.height} (${subject.source}, ${subject.seconds}s)`
+                ? `subject box x ${subject.box.x} y ${subject.box.y} w ${subject.box.width} h ${subject.box.height} (${subject.source}` +
+                    (subject.labels && subject.labels.length ? `: ${subject.labels.join(" + ")}` : "") +
+                    (subject.seconds != null ? `, ${subject.seconds}s` : "") + (subject.wholePhoto ? ", whole photo" : "") + ")"
                 : `no subject box — placement without it (${subject.reason})`);
         }
         for (const t of templates) {
@@ -1499,7 +1613,7 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                 usePoints(doc);
                 unlockAll(doc);
 
-                const result = populateDocument(doc, t, rec, subject);
+                const result = populateDocument(doc, t, rec, subject, { placementMode });
                 for (const r of result.reports) run.line(headline, `${t.name} check`, "", "info", r);
                 if (result.errors.length) {
                     throw new Error("not saved — " + result.errors.join(" / "));
@@ -1518,7 +1632,14 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                     (warnings.length ? ` (${warnings.length} warning(s))` : ""));
                 generated.push({ rec, subType: t.subType, inddPath, warnings, image: image.summary,
                     // for the panel's status line only (Subject ✓ Detected / — Default placement)
-                    subject: subject ? { detected: !!subject.box, reason: subject.box ? "" : (subject.reason || "") } : null });
+                    // (also without detection in frames mode, so "red frame not used" shows)
+                    subject: subject || placementMode === "frames" ? { detected: !!(subject && subject.box),
+                        reason: subject && subject.box ? "" : ((subject && subject.reason) || "subject detection off"),
+                        source: (subject && subject.source) || "", chosen: !!(subject && subject.source === "chosen"), labels: (subject && subject.labels) || [],
+                        wholePhoto: !!(subject && subject.box && subject.wholePhoto && subject.source !== "chosen"),
+                        mode: placementMode,
+                        inFrame: result.plan ? result.plan.pages.filter((pg) => pg.placement && pg.placement.zone).length : 0,
+                        zones: placementMode === "frames" && result.plan ? result.plan.pages.filter((pg) => pg.descriptor && pg.descriptor.zone).length : 0 } : null });
             } catch (e) {
                 // Nothing saved for this product + template.
                 fail(e);
@@ -1901,7 +2022,11 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     //      this product, split only when a shared master is impossible;
     //    independent: one unit per page.
     const batchMode = (backend.config && backend.config.batchMode) || ext.CONFIG.batchMode;
-    const todo = pages.filter((p) => p.record.status === "extension_required");
+    // allowLarge (a manual Extend after the panel's warning): pages that are
+    // only over the soft limits (extension ratio / resolution) are extended too.
+    const allowLarge = !!(options && options.allowLarge);
+    const todo = pages.filter((p) => p.record.status === "extension_required" ||
+        (allowLarge && p.record.status === "needs_review" && p.record.overridable && p.record.plan));
     for (const p of todo) p.plan = registry.get(p.record.plan.key).plan;
     let eligible = todo;
     if (cfg && cfg.onlyPlanId) {
@@ -1936,7 +2061,7 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     if (batchMode === "independent") {
         units = eligible.map((p) => ({ plan: p.plan, pages: [p], usedFor: usedForPages([p]) }));
     } else {
-        units = ext.groupIntoMasterPlans(eligible.map((p) => ({ plan: p.plan, graphicBounds: p.record.graphicBounds, ref: p })))
+        units = ext.groupIntoMasterPlans(eligible.map((p) => ({ plan: p.plan, graphicBounds: p.record.graphicBounds, ref: p })), { allowLarge })
             .map((g) => {
                 const pages = g.pages.map((x) => x.ref);
                 return { plan: g.master, pages, usedFor: usedForPages(pages) };
@@ -2058,6 +2183,137 @@ function typeOfTemplate(path) {
 // Opens a working copy of a prepared template and discovers its layouts
 // (for the panel after Prepare). Never changes the template.
 // Returns { subType, detected, layouts, notes, problems }.
+// ---------- the open Template Set (Custom Subject Frames) ----------
+//
+// doc.fullName comes back in different shapes depending on the InDesign
+// build (string, File-like object, file: URL, %-encoded, "~/…"), so the open
+// template is matched on every normalised spelling, and — if none matches —
+// on the file name when exactly one open document has it.
+function pathSpellings(v) {
+    const out = [];
+    if (!v) return out;
+    if (typeof v === "string") out.push(v);
+    else {
+        for (const k of ["nativePath", "fsName", "fullName", "absoluteURI", "url"]) {
+            try { if (typeof v[k] === "string" && v[k]) out.push(v[k]); } catch (e) {}
+        }
+        try { const s = String(v); if (/^(\/|~|file:)/.test(s)) out.push(s); } catch (e) {}
+    }
+    return out;
+}
+
+function normalisedPath(p) {
+    let s = String(p || "").trim().replace(/^file:(\/\/)?/, "");
+    if (/%[0-9a-f]{2}/i.test(s)) { try { s = decodeURIComponent(s); } catch (e) {} }
+    try { s = s.normalize("NFC"); } catch (e) {}
+    return s.replace(/\/+$/, "").toLowerCase();
+}
+
+function findOpenTemplate(templatePath) {
+    const { app } = indesign();
+    const want = normalisedPath(templatePath);
+    const wantTail = want.replace(/^~/, "");
+    const byName = [];
+    try {
+        for (let i = 0; i < app.documents.length; i++) {
+            const doc = app.documents.item(i);
+            let full = null;
+            try { full = doc.fullName; } catch (e) {}
+            const spellings = pathSpellings(full).map(normalisedPath);
+            if (spellings.some((s) => s === want || (s.startsWith("~") && want.endsWith(s.slice(1))) || (want.startsWith("~") && s.endsWith(wantTail)))) return doc;
+            let name = "";
+            try { name = String(doc.name || ""); } catch (e) {}
+            if (normalisedPath(name) === normalisedPath(basename(templatePath))) byName.push(doc);
+        }
+    } catch (e) {}
+    return byName.length === 1 ? byName[0] : null;
+}
+
+// For the panel's poll: is the template open, does it have unsaved changes?
+function templateState(templatePath) {
+    const doc = findOpenTemplate(templatePath);
+    let modified = false;
+    try { modified = !!(doc && doc.modified); } catch (e) {}
+    return { open: !!doc, modified };
+}
+
+// "Save Frame Changes": saves the open template so Generate (which reads it
+// from disk) uses the moved red frames. Returns { open, saved, wasModified }.
+async function saveTemplate(templatePath) {
+    const doc = findOpenTemplate(templatePath);
+    if (!doc) return { open: false, saved: false, wasModified: false };
+    let wasModified = false;
+    try { wasModified = !!doc.modified; } catch (e) {}
+    if (wasModified) await saveWhenIdle(doc);
+    return { open: true, saved: wasModified, wasModified };
+}
+
+// Custom Subject Frames: draws a default red subject frame on every layout
+// of the prepared template (the Template Set) — where Auto Placement would
+// put the subject: the image frame's free area clear of the text, with a
+// small margin. The designer then moves / resizes them and saves.
+// Opens the template in InDesign (visible) if it isn't open, saves it, and
+// leaves it open in front.
+//   options.reset: replace existing frames (otherwise layouts that already
+//   have one keep it)
+// Returns { name, pages: [{ page, layout, action: "added"|"kept"|"replaced" }], saved }.
+async function addDefaultSubjectFrames(templatePath, options) {
+    const reset = !!(options && options.reset);
+    const zm = zoneModule();
+    if (!zm || typeof zm.addZoneFrame !== "function") throw new Error("subjectzone.js is not available");
+    const { app } = indesign();
+    if (!(await pathExists(templatePath))) throw new Error("Template not found: " + templatePath);
+    let doc = findOpenTemplate(templatePath) || findOpenDocument(templatePath);
+    if (!doc) doc = app.open(templatePath, true);
+    try { app.activeDocument = doc; } catch (e) {}
+    // Unrelated unsaved edits in the template are not saved on the
+    // designer's behalf — then the frames are added but not saved.
+    let hadEdits = false;
+    try { hadEdits = !!doc.modified; } catch (e) {}
+    // Work in points, then give the designer their ruler units back.
+    let units = null;
+    try { units = [doc.viewPreferences.horizontalMeasurementUnits, doc.viewPreferences.verticalMeasurementUnits]; } catch (e) {}
+    usePoints(doc);
+    const subType = subTypeFromPath(templatePath);
+    const plan = planPages(doc, subType);
+    if (plan.problems.length) throw new Error("Template structure: " + plan.problems.join("; "));
+    const layer = zm.ensureZoneLayer(doc);
+    const colour = zm.zoneColour(doc);
+    let none = null;
+    try { none = doc.swatches.itemByName("None"); } catch (e) {}
+    const placement = placementModule();
+    const pages = [];
+    for (const pg of plan.pages) {
+        const page = doc.pages.item(pg.index);
+        const label = `${pg.layout.size} ${pg.layout.position}`;
+        const existing = zm.zoneForPage(page);
+        if (existing && !reset) { pages.push({ page: pg.index + 1, layout: label, action: "kept" }); continue; }
+        if (existing) {
+            zm.removeOwnZones(page);
+            // A frame on the parent (master) page can't be replaced here.
+            if (zm.zoneForPage(page)) { pages.push({ page: pg.index + 1, layout: label, action: "kept", onParent: true }); continue; }
+        }
+        const imageFrame = findImageFrame(page);
+        if (!imageFrame) continue;
+        const avoid = [findHeadlineFrame(page), findFooterFrame(page)].filter(Boolean)
+            .map((f) => Array.from(f.geometricBounds, Number));
+        const bounds = placement.defaultSubjectZone(Array.from(imageFrame.geometricBounds, Number), Array.from(page.bounds, Number), avoid);
+        zm.addZoneFrame(page, bounds, layer, colour, none);
+        pages.push({ page: pg.index + 1, layout: label, action: existing ? "replaced" : "added" });
+    }
+    try {
+        if (units) {
+            doc.viewPreferences.horizontalMeasurementUnits = units[0];
+            doc.viewPreferences.verticalMeasurementUnits = units[1];
+        }
+    } catch (e) {}
+    let saved = false;
+    if (!hadEdits) {
+        try { await saveWhenIdle(doc); saved = true; } catch (e) { saved = false; }
+    }
+    return { name: basename(templatePath), pages, saved, hadEdits };
+}
+
 async function detectTemplateLayouts(templatePath) {
     const subType = subTypeFromPath(templatePath);
     let doc = null;
@@ -2086,5 +2342,6 @@ async function writeLog(logLines, logPath) {
 module.exports = {
     checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
     isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
+    addDefaultSubjectFrames, templateState, saveTemplate,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
 };

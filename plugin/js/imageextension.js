@@ -386,11 +386,17 @@ function createExtensionPlan(input) {
 }
 
 // PURE. May Firefly extend this plan automatically?
-// Returns { eligible, reasons: [] }.
+// Returns { eligible, reasons: [], overridable }.
+//   overridable: not eligible ONLY because of the soft limits (extension
+//   over maxExtensionRatio, or output resolution below outputPxPerPt) — the
+//   designer may still start it by hand (Extend Image, after a warning).
+//   Unsupported file type / Firefly canvas size are hard limits.
 function checkAutoExtensionEligibility(plan) {
     const reasons = [];
+    let hard = false;
     if (CONFIG.fireflyFormats.indexOf(plan.source.format) === -1) {
         reasons.push(`unsupported image type for Firefly: ${plan.source.format}`);
+        hard = true;
     }
     if (plan.ratio.max > CONFIG.maxExtensionRatio) {
         reasons.push(`Required extension exceeds automatic generation limit ` +
@@ -398,12 +404,13 @@ function checkAutoExtensionEligibility(plan) {
     }
     if (plan.working.size.width > CONFIG.fireflyMaxSide || plan.working.size.height > CONFIG.fireflyMaxSide) {
         reasons.push(`Firefly canvas ${plan.working.size.width}×${plan.working.size.height} exceeds ${CONFIG.fireflyMaxSide} px`);
+        hard = true;
     }
     if (!plan.working.resolutionOk) {
         reasons.push(`Firefly's ${CONFIG.fireflyMaxSide} px limit can't give the output enough resolution ` +
             `(${plan.working.pxPerPt} px/pt < ${CONFIG.outputPxPerPt})`);
     }
-    return { eligible: reasons.length === 0, reasons };
+    return { eligible: reasons.length === 0, reasons, overridable: reasons.length > 0 && !hard };
 }
 
 // A run's plan registry: Map key -> { plan, eligible, uses: [{product, layout, page}] }.
@@ -570,6 +577,8 @@ async function analyzeImageCoverage(frame, ctx, registry) {
         if (!eligibility.eligible) {
             for (const r of eligibility.reasons) rec.problems.push(r);
             rec.status = "needs_review";
+            // Over a soft limit only: Extend Image can still be started by hand.
+            rec.overridable = !!eligibility.overridable;
             return rec;
         }
         rec.status = "extension_required";
@@ -1092,15 +1101,18 @@ function createMasterExtensionPlan(members) {
 // make the master ineligible (combined extension over the limit, or a
 // page's output resolution too low at the master's working scale).
 //   pages: [{ plan, graphicBounds, ref }] — ref is returned untouched
+//   options.allowLarge: a manual Extend of over-limit pages — a master that
+//   is only over the soft limits may still be shared
 // Returns [{ master, pages }] (deterministic: input order).
-function groupIntoMasterPlans(pages) {
+function groupIntoMasterPlans(pages, options) {
+    const allowLarge = !!(options && options.allowLarge);
     const groups = [];
     for (const p of pages) {
         let placed = false;
         for (const g of groups) {
             if (g.sourceKey !== String(p.plan.source.path).toLowerCase() + "|" + p.plan.source.width + "x" + p.plan.source.height) continue;
             const trial = createMasterExtensionPlan(g.pages.concat([p]));
-            if (!trial.eligibility.eligible) continue;
+            if (!trial.eligibility.eligible && !(allowLarge && trial.eligibility.overridable)) continue;
             g.pages.push(p);
             g.master = trial;
             placed = true;

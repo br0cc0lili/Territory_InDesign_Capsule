@@ -241,10 +241,30 @@ function findFooterFrame(page) {
 
 // <<MainImage>>, else the single graphic frame (Rectangle/Polygon/Oval) on
 // the "Image" layer — with a sample image placed or empty, both are valid.
+// The red subject frame (subjectzone.js) is never the image frame, even when
+// it is drawn on the "Image" layer.
 function findImageFrame(page) {
     const named = namedItem(page, FRAME_NAMES.image, isGraphicFrame);
     if (named) return { frame: named, via: "name" };
-    return exactlyOneOnLayer(page, LAYERS.image, isGraphicFrame, "graphic");
+    return exactlyOneOnLayer(page, LAYERS.image, (it) => isGraphicFrame(it) && !isSubjectZone(it), "graphic");
+}
+
+// Red subject frame helpers (subjectzone.js), loaded lazily like templatetype.js.
+let _zone = null;
+function zoneModule() {
+    if (_zone) return _zone;
+    for (const path of ["./subjectzone.js", "./js/subjectzone.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.isSubjectZone === "function") return (_zone = mod);
+        } catch (e) {}
+    }
+    return null;
+}
+
+function isSubjectZone(it) {
+    const mod = zoneModule();
+    try { return !!(mod && mod.isSubjectZone(it)); } catch (e) { return false; }
 }
 
 // Shared DANIS/Service rule (templatetype.js). Loaded lazily, module-relative
@@ -794,6 +814,14 @@ async function prepareDocument(doc, csvPath) {
                     entry.notes.push(`⚠ ${what}: ${e}`);
                 }
             }
+            // The red subject frame is left exactly as drawn (not renamed or
+            // moved) — Generate finds it again on every run.
+            try {
+                const zm = zoneModule();
+                const zone = zm ? zm.zoneForPage(page) : null;
+                entry.zone = !!zone;
+                if (zone) entry.notes.push(`red subject frame found (by ${zone.via}${zone.count > 1 ? `; ${zone.count} found, the largest is used` : ""})`);
+            } catch (e) {}
         }
     } finally {
         relock();

@@ -19,7 +19,7 @@ const fs = uxp.storage.localFileSystem;
 // an environment where require("indesign") turns out not to behave as
 // expected), we still want every OTHER button in the panel to keep working
 // instead of the whole script aborting silently before any listener attaches.
-let matcher = null, render = null, datamerge = null;
+let matcher = null, render = null, datamerge = null, subjectMod = null, pickerMod = null;
 const loadErrors = [];
 // Note: index.js is loaded via a plain <script src="js/index.js"> tag in
 // index.html, so require()'s relative resolution here is anchored at the
@@ -27,6 +27,9 @@ const loadErrors = [];
 try { matcher = require("./js/matcher.js"); } catch (e) { loadErrors.push("matcher.js: " + e); }
 try { render = require("./js/render.js"); } catch (e) { loadErrors.push("render.js: " + e); }
 try { datamerge = require("./js/datamerge.js"); } catch (e) { loadErrors.push("datamerge.js: " + e); }
+// Choose Subject (bounding box): object detection + choices, and its window.
+try { subjectMod = require("./js/subject.js"); } catch (e) { loadErrors.push("subject.js: " + e); }
+try { pickerMod = require("./js/subjectpicker.js"); } catch (e) { loadErrors.push("subjectpicker.js: " + e); }
 
 let excelEntry = null;
 let photosEntry = null;
@@ -73,6 +76,14 @@ const el = {
     progressLabel: document.getElementById("progress-label"),
     activeProduct: document.getElementById("active-product"),
     activeName: document.getElementById("active-name"),
+    modeAuto: document.getElementById("mode-auto"),
+    modeFrames: document.getElementById("mode-frames"),
+    framesActions: document.getElementById("frames-actions"),
+    btnAddFrames: document.getElementById("btn-add-frames"),
+    btnResetFrames: document.getElementById("btn-reset-frames"),
+    btnSaveFrames: document.getElementById("btn-save-frames"),
+    framesUnsaved: document.getElementById("frames-unsaved"),
+    framesSummary: document.getElementById("frames-summary"),
     activeActions: document.getElementById("active-actions"),
     activeStatus: document.getElementById("active-status"),
     dialog: document.getElementById("action-dialog"),
@@ -89,6 +100,7 @@ const STORE = {
     output: "posterBatch.outputPath",
     templates: "posterBatch.templatePaths",
     statuses: "posterBatch.inddStatuses",
+    placementMode: "posterBatch.placementMode",
 };
 
 function remember(key, value) {
@@ -97,6 +109,43 @@ function remember(key, value) {
 
 function recall(key) {
     try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; }
+}
+
+// Features that exist in the code but are switched off in the panel.
+//   chooseSubject: ⋯ → Choose Subject (pick objects with mask-objects) —
+//   paused; needs the subject-objects backend actions.
+const FEATURES = { chooseSubject: false };
+
+// ---------- step 3: Subject Placement ----------
+//   "auto"   — Auto Placement: centred in the free area, clear of the text
+//   "frames" — Custom Subject Frames: the red frames in the template decide
+function placementMode() {
+    return recall(STORE.placementMode) === "frames" ? "frames" : "auto";
+}
+
+// classList.toggle(name, force) isn't reliable in every UXP version.
+function setClass(node, name, on) {
+    if (on) node.classList.add(name); else node.classList.remove(name);
+}
+
+function showPlacementMode() {
+    if (!el.modeAuto) return;
+    const frames = placementMode() === "frames";
+    setClass(el.modeAuto, "mode-selected", !frames);
+    setClass(el.modeFrames, "mode-selected", frames);
+    setClass(el.framesActions, "hidden", !frames);
+    if (!frames) el.framesSummary.textContent = "";
+    else if (!el.framesSummary.textContent) {
+        el.framesSummary.textContent = templatePaths.length ? "" : "Prepare the template in step 2 first.";
+    }
+}
+
+function setPlacementMode(mode) {
+    if (busy) return;
+    remember(STORE.placementMode, mode === "frames" ? "frames" : "auto");
+    el.framesSummary.textContent = "";
+    showPlacementMode();
+    updateButtons();
 }
 
 // UXP Entry for a remembered path, or null if it's gone.
@@ -164,6 +213,7 @@ async function restoreSelections() {
     // One template set; older versions may have stored several — keep the last.
     for (const p of paths.slice(-1)) if (await entryFor(p)) templatePaths.push(p);
     showContext();
+    showPlacementMode();
     updateButtons();
 }
 
@@ -202,6 +252,12 @@ function committedRows() {
 }
 
 function updateButtons() {
+    if (el.btnAddFrames) {
+        const noFrames = busy || !templatePaths.length || placementMode() !== "frames";
+        el.btnAddFrames.disabled = noFrames;
+        el.btnResetFrames.disabled = noFrames;
+        el.btnSaveFrames.disabled = noFrames;
+    }
     el.btnMatch.disabled = busy || !(excelEntry && photosEntry);
     el.btnGenerate.disabled = busy || !(hasMatchedRows() && outputEntry && templatePaths.length);
     el.btnCommitAll.disabled = busy || readyRows().length === 0;
@@ -221,6 +277,9 @@ function setTemplate(path) {
     templatePaths = [path];
     remember(STORE.templates, templatePaths);
     showContext();
+    // New template set: the step 3 hint starts over.
+    if (el.framesSummary) el.framesSummary.textContent = "";
+    showPlacementMode();
 }
 
 function showFontBanner(message) {
@@ -449,6 +508,85 @@ function showDialog(title, message, buttons, options) {
     });
 }
 
+// ---------- step 3: Subject Placement handlers ----------
+
+if (el.modeAuto) {
+    el.modeAuto.addEventListener("click", () => setPlacementMode("auto"));
+    el.modeFrames.addEventListener("click", () => setPlacementMode("frames"));
+    el.btnAddFrames.addEventListener("click", () => addFrames(false));
+    el.btnSaveFrames.addEventListener("click", saveFrames);
+    el.btnResetFrames.addEventListener("click", async () => {
+        const go = await showDialog("Reset Frames?",
+            "Every layout gets a new default red frame — frames you moved or resized are replaced.",
+            [{ label: "Reset Frames", value: "go", danger: true }]);
+        if (go === "go") await addFrames(true);
+    });
+}
+
+// Draws default red subject frames in the Template Set (keeps existing ones
+// unless reset), opens the template in front so they can be adjusted.
+async function addFrames(reset) {
+    if (!render || !templatePaths.length) return;
+    setBusy(true);
+    el.framesSummary.textContent = reset ? "Replacing the red frames…" : "Adding red frames to the template…";
+    try {
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
+        const r = await render.addDefaultSubjectFrames(templatePaths[0], { reset });
+        const added = r.pages.filter((p) => p.action !== "kept").length;
+        const kept = r.pages.length - added;
+        const lines = [
+            added ? `✓ ${added} red frame${added === 1 ? "" : "s"} ${reset ? "replaced" : "added"} in ${r.name}` : `✓ Every layout of ${r.name} already has a red frame`,
+        ];
+        if (kept && added) lines.push(`${kept} layout${kept === 1 ? "" : "s"} kept ${kept === 1 ? "its" : "their"} frame`);
+        const onParent = r.pages.filter((p) => p.onParent).length;
+        if (onParent) lines.push(`⚠ ${onParent} frame${onParent === 1 ? " is" : "s are"} on a parent (master) page — change ${onParent === 1 ? "it" : "them"} there`);
+        lines.push("Now move or resize the red frames in the template (it's open in InDesign), then click Save Frame Changes.");
+        if (r.hadEdits) lines.push("The template had other unsaved changes, so it wasn't saved — check it, then click Save Frame Changes.");
+        else if (!r.saved) lines.push("⚠ The template couldn't be saved — press Cmd+S in InDesign.");
+        el.framesSummary.textContent = lines.join("\n");
+    } catch (e) {
+        el.framesSummary.textContent = errorText(e);
+    } finally {
+        setBusy(false);
+    }
+}
+
+// "Save Frame Changes": saves the open template so the next Generate /
+// Regenerate uses the moved red frames (Generate reads the template from disk).
+async function saveFrames() {
+    if (!render || !templatePaths.length) return;
+    setBusy(true);
+    try {
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
+        const r = await render.saveTemplate(templatePaths[0]);
+        const name = templatePaths[0].split("/").pop();
+        el.framesSummary.textContent = !r.open
+            ? `${name} isn't open in InDesign — nothing to save. Click Add Default Frames to open it with its red frames.`
+            : r.saved
+                ? `✓ Frame changes saved in ${name}. Click Generate All (or ⋯ → Regenerate .indd) to apply them.`
+                : `✓ No unsaved changes in ${name} — the red frames are up to date. Click Generate All to apply them.`;
+    } catch (e) {
+        el.framesSummary.textContent = "Couldn't save the template: " + errorText(e) + " — press Cmd+S in InDesign.";
+    } finally {
+        setBusy(false);
+        pollTemplateFrames();
+    }
+}
+
+// Every second (Custom Subject Frames only): warn while the template has
+// unsaved changes, so moved frames aren't forgotten.
+function pollTemplateFrames() {
+    if (!el.framesUnsaved || !render || typeof render.templateState !== "function") return;
+    let unsaved = false;
+    if (!busy && placementMode() === "frames" && templatePaths.length) {
+        try { unsaved = render.templateState(templatePaths[0]).modified; } catch (e) {}
+    }
+    setClass(el.framesUnsaved, "hidden", !unsaved);
+    setClass(el.btnSaveFrames, "btn-attention", unsaved);
+}
+
+setInterval(pollTemplateFrames, 1000);
+
 // ---------- init ----------
 
 async function init() {
@@ -505,6 +643,8 @@ function resetPanel() {
     hideProgress();
     el.resultsBody.innerHTML = "";
     showContext();
+    if (el.framesSummary) el.framesSummary.textContent = "";
+    showPlacementMode();
     updateButtons();
 }
 
@@ -583,7 +723,7 @@ el.btnDmPrepare.addEventListener("click", async () => {
         // Short, user-facing summary: one line per page. A page that failed
         // also shows what went wrong; full details stay out of the panel.
         const pageLines = result.pages.map((pg) => {
-            if (pg.ok) return `✓ Page ${pg.page}`;
+            if (pg.ok) return `✓ Page ${pg.page}` + (pg.zone ? " · red subject frame ▣" : "");
             const problems = pg.notes.filter((n) => n.startsWith("⚠")).map((n) => "    " + n.replace(/^⚠\s*/, ""));
             return [`⚠ Page ${pg.page}`].concat(problems).join("\n");
         });
@@ -734,7 +874,8 @@ function imageLine(image) {
         case "extended_cached": return ["detail-muted", "Image ✓ Extended"];
         case "re_extended": return ["detail-muted", "Image ↻ Re-extended"];
         case "extension_hidden": return ["detail-warning", "Image ◌ Extension hidden"];
-        case "needs_review": return ["detail-warning", "Image ⚠ Needs review"];
+        case "needs_review": return ["detail-warning", image.overridable
+            ? "Image ⚠ Large gap — Extend Image by hand (over the auto limit)" : "Image ⚠ Needs review"];
         default: return ["detail-error", "Image ✗ Check failed"];
     }
 }
@@ -747,17 +888,35 @@ function pagesNeedingExtension(s) {
 }
 
 // Bounding-box (subject) result of the last Generate — status only.
+//   Subject ✓ Chosen: Car + Person | Subject ⚠ Whole photo — use Choose Subject |
+//   Subject ✓ Detected | Subject — Default placement   (+ "· red frame" when used)
+//   Subject ✓ In red frame | Subject ✓ Auto-centred | Subject — Busy photo, normal placement |
+//   Subject — Default placement
 function subjectLine(s) {
     const subj = s && s.subject;
     if (!subj) return null;
-    return subj.detected ? ["detail-muted", "Subject ✓ Detected"] : ["detail-muted", "Subject — Default placement"];
+    if (subj.inFrame) return ["detail-muted", "Subject ✓ In red frame"];
+    // Custom Subject Frames chosen, but no frame could be used for this product.
+    if (subj.mode === "frames" && subj.zones) {
+        return ["detail-warning", subj.wholePhoto
+            ? "Subject — Red frame not used: busy photo (adjust by hand if needed)"
+            : "Subject — Red frame not used: no subject found" + (subj.reason ? ` (${String(subj.reason).slice(0, 60)})` : "")];
+    }
+    if (subj.wholePhoto) {
+        return [subj.mode === "frames" && subj.zones ? "detail-warning" : "detail-muted",
+            "Subject — Busy photo, normal placement (adjust by hand if needed)"];
+    }
+    return subj.detected ? ["detail-muted", "Subject ✓ Auto-centred"] : ["detail-muted", "Subject — Default placement"];
 }
 
 // Which Image Extension controls a product shows.
 function extensionControls(s) {
     const image = (s && s.image) || {};
     const st = image.status;
-    const extend = st === "extension_available" || st === "extension_required" || st === "skipped" || st === "awaiting_user";
+    // needs_review + overridable: only over the automatic limit — still
+    // extendable by hand (after a warning, see extendRow).
+    const extend = st === "extension_available" || st === "extension_required" || st === "skipped" || st === "awaiting_user" ||
+        (st === "needs_review" && !!image.overridable);
     // An extension is on the INDD (also when only some pages are extended).
     const hasExt = !!image.extension || EXTENDED.indexOf(st) !== -1 || st === "extension_hidden";
     return {
@@ -780,7 +939,9 @@ function detailLines(rec, state, s) {
     if (s && s.error) lines.push(["detail-error", "✗ " + String(s.error).split(" — ")[0].slice(0, 80)]);
     const image = s && s.image;
     if (image) lines.push(imageLine(image));
-    const warnings = ((s && s.warnings) || []).filter((w) => !(image && IMAGE_WARNING.test(w)));
+    if (s && s.subject && s.subject.mode === "frames" && s.subject.zones && !s.subject.inFrame) lines.push(subjectLine(s));
+    const warnings = ((s && s.warnings) || []).filter((w) => !(image && IMAGE_WARNING.test(w)) &&
+        !(s.subject && s.subject.wholePhoto && /covers the whole photo/.test(w)));
     if (warnings.length) lines.push(["detail-warning", `⚠ ${warnings.length} other warning${warnings.length === 1 ? "" : "s"} — see ⋯`]);
     return lines;
 }
@@ -967,7 +1128,9 @@ function mergeImageStatus(old, fresh) {
     if (fresh.status === "extension_hidden") return keep({ extendedAs: flavour || "extended" });
     if (fresh.status === "extended" && flavour) return keep({ status: flavour });
     if (fresh.status === "extension_available" && !fresh.extension &&
-        ["needs_review", "skipped", "failed"].indexOf(old.status) !== -1) return keep({ status: old.status, text: old.text });
+        ["needs_review", "skipped", "failed"].indexOf(old.status) !== -1) {
+        return keep({ status: old.status, text: old.text, overridable: !!old.overridable, maxRatio: old.maxRatio || 0 });
+    }
     return keep();
 }
 
@@ -997,7 +1160,7 @@ async function runGenerate(rows, title) {
     try {
         if (!(await waitForInDesign())) throw new Error(NOT_READY);
         const result = await render.generateIndds(rows, templatePaths, outputEntry.nativePath,
-            progressTo(channels.generate));
+            progressTo(channels.generate), { placementMode: placementMode(), useChoices: FEATURES.chooseSubject });
         recordGeneration(result);
         await refreshProducts();
         return result;
@@ -1177,13 +1340,23 @@ async function extendRow(rec, mode, prompt) {
     const choice = mode || "extend";
     prompt = choice === "use_existing" ? "" : String(prompt || "").slice(0, 1024); // Firefly's limit
     const item = itemFor(rec);
+    // Over the automatic limit: say so and let the designer decide.
+    if (choice !== "use_existing" && previous.status === "needs_review" && previous.overridable) {
+        const pct = previous.maxRatio ? Math.round(previous.maxRatio * 100) : null;
+        const go = await showDialog("Large extension",
+            (pct ? `This photo needs about ${pct}% new image` : "This photo needs a lot of new image") +
+            " — more than the 50% automatic limit. Firefly can still try, but the generated part may look less natural. " +
+            "Check it before Commit.",
+            [{ label: "Extend Anyway", value: "go" }]);
+        if (go !== "go") return;
+    }
     setBusy(true);
     setStatus(p.inddPath, { image: Object.assign({}, previous, { status: "extending" }) });
     startProgress(channels.generate, choice === "regenerate" ? "Re-extending" : "Extending", `Extending ${rec.headline}…`);
     try {
         if (!(await waitForInDesign())) throw new Error(NOT_READY);
         const result = await render.extendProductImage(item, outputEntry.nativePath, choice, progressTo(channels.generate),
-            { prompt });
+            { prompt, allowLarge: true });
         try {
             await render.writeLog(result.logLines, outputEntry.nativePath + "/image_extension_apply_log.jsonl");
         } catch (e) {}
@@ -1323,6 +1496,8 @@ async function productActions(rec) {
     const image = (s && s.image) || {};
     const stored = (image.plans || []).some((x) => x.cachedVersion) || EXTENDED.indexOf(image.status) !== -1 ||
         image.status === "extension_hidden" || !!image.extension;
+    const subjectGroup = FEATURES.chooseSubject && rec.imagePath && subjectMod && pickerMod
+        ? [{ header: "Subject" }, { label: "Choose Subject…", value: "choose_subject" }] : [];
     const doc = [{ header: "Document" }];
     if (p.exists) doc.push({ label: "Preview", value: "preview" });
     doc.push({ label: p.exists ? "Regenerate .indd" : "Generate .indd", value: "regenerate", danger: p.exists });
@@ -1344,10 +1519,12 @@ async function productActions(rec) {
     }
     const status = productStatusLines(s);
     const entries = (status.length ? [{ status }] : [])
+        .concat(subjectGroup)
         .concat(stored && ext.length ? ext.concat(doc) : doc.concat(ext))
         .concat([{ details: productDetailText(rec, p, s) }]);
     const answer = await showDialog(rec.headline, "", entries, { withText: true, closeLabel: stored ? "Close" : "Cancel" });
     const choice = answer.value;
+    if (choice === "choose_subject") await chooseSubjectRow(rec);
     if (choice === "preview") await previewRow(rec);
     if (choice === "regenerate") await regenerateRow(rec);
     if (choice === "output") await openOutputFolder(p.subType);
@@ -1360,6 +1537,84 @@ async function productActions(rec) {
 
 // Kept name for the ⋯ buttons.
 const moreMenu = productActions;
+
+// ⋯ → Choose Subject: finds every object in the product photo (once; stored
+// in <output>/subject_choices.json), lets the designer tick the one(s) for
+// the red subject frame, and saves the choice. It is used by the next
+// Generate / Regenerate of this product (every page and template).
+//   forceDetect: run object detection again (the old choice is cleared)
+async function chooseSubjectRow(rec, forceDetect) {
+    if (!subjectMod || !pickerMod) {
+        setMessage("Choose Subject isn't available — subject.js / subjectpicker.js failed to load (see the banner above).", channels.generate);
+        return;
+    }
+    if (!outputEntry) {
+        setMessage("Select the output folder first (step 1) — the subject choice is saved there.", channels.generate);
+        return;
+    }
+    const photoName = String(rec.imagePath).split("/").pop();
+    let store, key, entry;
+    setBusy(true);
+    try {
+        store = await subjectMod.loadSubjectChoices(outputEntry.nativePath);
+        key = await subjectMod.photoKey(rec.imagePath);
+        entry = store.items[key];
+        // An earlier detection that found nothing is retried automatically.
+        if (forceDetect || !entry || !Array.isArray(entry.objects) || !entry.objects.length) {
+            const sc = await subjectMod.loadSubjectConfig({ forObjects: true });
+            if (!sc.config) throw new Error("Choose Subject needs the team backend — " + sc.reason);
+            setMessage(`Finding the objects in ${photoName}… (about 10–30 s)`, channels.generate);
+            const found = await subjectMod.detectSubjectObjects(rec.imagePath, sc.config);
+            entry = { imagePath: rec.imagePath, objects: found.objects, selected: null, detectedAt: new Date().toISOString() };
+            if (found.debug) entry.debug = found.debug;
+            store.items[key] = entry;
+            await subjectMod.saveSubjectChoices(store);
+        }
+        setMessage("", channels.generate);
+    } catch (e) {
+        setMessage(errorText(e), channels.generate);
+        setBusy(false);
+        return;
+    }
+
+    // Still busy while the photo loads into the window (a few seconds for a
+    // big file), so no other run can start meanwhile.
+    let answer = null;
+    try {
+        answer = await pickerMod.showSubjectPicker({
+            title: `Choose Subject — ${rec.headline}`,
+            imagePath: rec.imagePath,
+            objects: entry.objects,
+            selected: entry.selected,
+            chosenBefore: !!(entry.selected && entry.selected.length),
+            unionBox: subjectMod.unionBox,
+            debug: entry.debug || "",
+        });
+    } catch (e) {
+        setMessage(errorText(e), channels.generate);
+    } finally {
+        setBusy(false);
+    }
+    if (!answer) return;
+    if (answer.action === "redetect") return chooseSubjectRow(rec, true);
+    entry.selected = answer.action === "auto" ? null : answer.selected;
+    entry.chosenAt = new Date().toISOString();
+    store.items[key] = entry;
+    try {
+        await subjectMod.saveSubjectChoices(store);
+    } catch (e) {
+        setMessage("Couldn't save the subject choice: " + errorText(e), channels.generate);
+        return;
+    }
+    const names = entry.objects.filter((o) => (entry.selected || []).indexOf(o.id) !== -1).map((o) => o.label);
+    if (answer.action === "save_regenerate") {
+        await regenerateRow(rec);
+        return;
+    }
+    setMessage(answer.action === "auto"
+        ? `${rec.headline}: back to the automatic subject — Regenerate .indd to apply it.`
+        : `${rec.headline}: subject = ${names.join(" + ")} — Regenerate .indd (⋯) or Generate All to apply it.`, channels.generate);
+}
 
 // Rebuilds ONE product's INDD, then opens it ("jumps" to it) in InDesign.
 // An INDD that's open is closed WITHOUT saving — only after the user

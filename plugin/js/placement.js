@@ -54,6 +54,15 @@ const PLACEMENT_CONFIG = {
     // minFreeShare: a free band smaller than this share of the frame is
     // ignored (the frame's centre is used instead).
     subject: { centerInExtendLayouts: true, maxInformativeSpan: 0.95, minFreeShare: 0.25 },
+    // Red subject frame (subjectzone.js) + subject box: planZonePlacement().
+    // The photo is scaled so the subject box fits the red frame (padding =
+    // inner margin as a share of the frame's width / height) and the
+    // subject's centre goes on the frame's centre; then the photo slides,
+    // without moving the subject out of the red frame, to cover as much of
+    // the image frame as possible. "extend" layouts may keep a gap (Image
+    // Extension fills it); "fill" layouts always cover the frame.
+    // defaultMargin: inset of a default subject frame inside the free band.
+    zone: { padding: 0.03, defaultMargin: 0.05 },
     fallback: {
         maxExtensionRatio: 0.5,
         verticalGapAnchor: { vertical: "top", horizontal: "center" },
@@ -216,6 +225,134 @@ function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = n
     return { mode: "extend", anchor: a, graphicBounds: [top, left, top + h, left + w], subjectBounds: sb, subjectShift };
 }
 
+// PURE. Placement inside the red subject frame.
+//   frameBounds: the <<MainImage>> frame [top, left, bottom, right]
+//   zoneBounds:  the red subject frame (any layer; only the part inside the
+//                image frame is used)
+//   sourceSize:  { width, height } of the photo (only the aspect matters)
+//   subjectBounds: subject box, shares (0..1) of the photo
+//   policy: from getLayoutPolicy() — "fill" layouts must cover the frame
+// Returns null when the zone or the box is unusable, else
+//   { mode, graphicBounds, subjectRect, zoneRect, gaps: { x, y }, warnings, notes }
+//   maxScale: optional largest scale of sourceSize (e.g. placed-at-100% size)
+//             the photo's resolution allows — never below the normal
+//             contain-fit size, so the cap can't make the product smaller
+//             than without a red frame
+function planZonePlacement({ frameBounds, zoneBounds, sourceSize, subjectBounds, policy, padding, maxScale }) {
+    const sb = validSubjectBox(subjectBounds);
+    if (!sb || !zoneBounds || !sourceSize || !(sourceSize.width > 0 && sourceSize.height > 0)) return null;
+    const f = toBox(frameBounds);
+    const zr = toBox(zoneBounds);
+    const z = { top: Math.max(zr.top, f.top), left: Math.max(zr.left, f.left), bottom: Math.min(zr.bottom, f.bottom), right: Math.min(zr.right, f.right) };
+    z.width = z.right - z.left; z.height = z.bottom - z.top;
+    if (!(z.width >= 1 && z.height >= 1)) return null;
+    const pad = padding != null ? padding : PLACEMENT_CONFIG.zone.padding;
+    const fillMode = policy.placementMode !== "extend";
+    const warnings = [];
+    const notes = [];
+    const W = sourceSize.width, H = sourceSize.height;
+    let fitScale = Math.min((z.width * (1 - 2 * pad)) / (sb.width * W), (z.height * (1 - 2 * pad)) / (sb.height * H));
+    const touchScale = Math.min(z.width / (sb.width * W), z.height / (sb.height * H)); // no inner margin
+    const containScale = Math.min(f.width / W, f.height / H);
+    const coverScale = Math.max(f.width / W, f.height / H);
+    const cap = maxScale > 0 ? Math.max(maxScale, containScale) : Infinity;
+    if (fitScale > cap * 1.001) {
+        fitScale = cap;
+        warnings.push("the photo's resolution is too low to enlarge the subject to fill the red frame — it is shown smaller");
+    }
+    const scale = fillMode ? Math.max(fitScale, coverScale) : fitScale;
+    if (fillMode && coverScale > touchScale * 1.001) {
+        warnings.push("the subject is bigger than the red frame here — this layout must be filled edge to edge, so the photo can't be made smaller");
+    }
+    const iw = W * scale, ih = H * scale;
+    // One axis: position of the photo's start edge.
+    function axis(fStart, fEnd, zStart, zEnd, size, b0, b1) {
+        const centre = (zStart + zEnd) / 2 - ((b0 + b1) / 2) * size;
+        const keepLo = zStart - b0 * size, keepHi = zEnd - b1 * size; // subject inside the zone
+        const frameSize = fEnd - fStart;
+        const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+        if (size < frameSize - 0.01) {
+            // Can't cover this axis: keep the whole photo inside the frame if possible.
+            const lo = Math.max(keepLo, fStart), hi = Math.min(keepHi, fEnd - size);
+            return { pos: lo <= hi ? clamp(centre, lo, hi) : clamp(centre, keepLo, keepHi), gap: true, outside: false, shifted: false };
+        }
+        const fillLo = fEnd - size, fillHi = fStart; // positions that cover the frame
+        const lo = Math.max(keepLo, fillLo), hi = Math.min(keepHi, fillHi);
+        if (lo <= hi + 0.01) {
+            const pos = clamp(centre, lo, Math.max(lo, hi));
+            return { pos, gap: false, outside: false, shifted: Math.abs(pos - centre) > 0.5 };
+        }
+        if (fillMode) return { pos: clamp(centre, fillLo, fillHi), gap: false, outside: true, shifted: true };
+        return { pos: clamp(centre, keepLo, keepHi), gap: true, outside: false, shifted: false };
+    }
+    const h = axis(f.left, f.right, z.left, z.right, iw, sb.x, sb.x + sb.width);
+    const v = axis(f.top, f.bottom, z.top, z.bottom, ih, sb.y, sb.y + sb.height);
+    const left = h.pos, top = v.pos;
+    if (h.outside || v.outside) warnings.push("part of the subject is outside the red frame (the layout must be filled edge to edge)");
+    if (h.shifted || v.shifted) notes.push("subject moved off the red frame's centre so the photo covers the image frame");
+    if (!fillMode && (h.gap || v.gap)) notes.push("photo doesn't cover the whole image frame — Image Extension can fill the rest");
+    const r = (n) => Math.round(n * 100) / 100;
+    return {
+        mode: fillMode ? "fill" : "extend",
+        graphicBounds: [top, left, top + ih, left + iw],
+        subjectRect: [top + sb.y * ih, left + sb.x * iw, top + (sb.y + sb.height) * ih, left + (sb.x + sb.width) * iw].map(r),
+        zoneRect: [z.top, z.left, z.bottom, z.right].map(r),
+        scale: r(scale / Math.min(f.width / W, f.height / H)), // 1 = same size as contain-fit
+        gaps: { x: h.gap, y: v.gap },
+        warnings, notes,
+    };
+}
+
+// PURE. Where a default subject frame goes on a page (Custom Subject Frames):
+// the part of the image frame (clipped to the page) that is clear of the
+// text frames — the same free band Auto Placement centres the subject in —
+// shrunk by `margin` (share of its width / height) on every side.
+//   frameBounds: <<MainImage>> frame; pageBounds: the page; avoidBounds: text frames
+// Returns [top, left, bottom, right].
+function defaultSubjectZone(frameBounds, pageBounds, avoidBounds, margin) {
+    const f0 = toBox(frameBounds);
+    const p = pageBounds ? toBox(pageBounds) : f0;
+    const f = { top: Math.max(f0.top, p.top), left: Math.max(f0.left, p.left), bottom: Math.min(f0.bottom, p.bottom), right: Math.min(f0.right, p.right) };
+    if (!(f.bottom - f.top > 1 && f.right - f.left > 1)) Object.assign(f, f0);
+    const overl = (avoidBounds || []).map(toBox).filter((o) => o.right > f.left && o.left < f.right && o.bottom > f.top && o.top < f.bottom);
+    const minShare = PLACEMENT_CONFIG.subject.minFreeShare;
+    const freeY = largestFreeInterval(f.top, f.bottom, overl.map((o) => [o.top, o.bottom]), minShare) || [f.top, f.bottom];
+    const freeX = largestFreeInterval(f.left, f.right, overl.map((o) => [o.left, o.right]), minShare) || [f.left, f.right];
+    const m = margin != null ? margin : PLACEMENT_CONFIG.zone.defaultMargin;
+    const dy = (freeY[1] - freeY[0]) * m, dx = (freeX[1] - freeX[0]) * m;
+    const r = (n) => Math.round(n * 100) / 100;
+    return [freeY[0] + dy, freeX[0] + dx, freeY[1] - dy, freeX[1] - dx].map(r);
+}
+
+// Places the file and moves it into the red subject frame (planZonePlacement).
+// Returns { note, placementPlan } or null (zone / box unusable — the caller
+// then places the normal way).
+function placeImageInZone(frame, imagePath, policy, subjectBounds, zoneBounds) {
+    frame.place(imagePath);
+    const graphics = frame.allGraphics;
+    if (!graphics || graphics.length !== 1) throw new Error(`expected 1 placed graphic, found ${graphics ? graphics.length : 0}`);
+    const graphic = itemAt(graphics, 0);
+    const g = toBox(graphic.geometricBounds);
+    // Freshly placed = 100%: actualPpi / 72 is the largest scale that keeps
+    // at least 1 image pixel per point (= per output pixel at 72 dpi).
+    let maxScale = 0;
+    try {
+        const ppi = Array.from(graphic.actualPpi || [], Number);
+        if (ppi.length && ppi.every((v) => v > 0)) maxScale = Math.min(...ppi) / 72;
+    } catch (e) {}
+    const plan = planZonePlacement({
+        frameBounds: frame.geometricBounds, zoneBounds, sourceSize: { width: g.width, height: g.height },
+        subjectBounds, policy, maxScale,
+    });
+    if (!plan) return null;
+    graphic.geometricBounds = plan.graphicBounds;
+    return {
+        note: `placement=subject-frame (${plan.mode}; policy ${policy.id}; scale x${plan.scale} vs contain` +
+            `; subject ${plan.subjectRect.join(",")} in red frame ${plan.zoneRect.join(",")})`,
+        placementPlan: plan,
+    };
+}
+
 // Moves/scales the placed graphic to the plan's bounds. Proportional by
 // construction (the plan keeps the aspect); the frame is never changed.
 function applyImagePlacement(graphic, placementPlan) {
@@ -262,4 +399,5 @@ function placeImageForExtension(frame, imagePath, id, policy, subjectBounds, avo
 module.exports = {
     PLACEMENT_CONFIG, validSubjectBox, largestFreeInterval, getLayoutPolicy, geometryFallbackPolicy, resolvePlacementPolicy, probeSourceSize,
     planImagePlacement, applyImagePlacement, placeImageForExtension,
+    planZonePlacement, placeImageInZone, defaultSubjectZone,
 };

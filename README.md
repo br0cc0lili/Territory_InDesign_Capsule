@@ -74,6 +74,7 @@ One file per template type: one DANIS and one Service.
 | `text` | **Required**, exactly 1 text frame per page | 1st non-empty paragraph = headline; 2nd non-empty paragraph = subline |
 | `Image` | **Required**, exactly 1 graphic frame per page (rectangle / polygon / oval) | Main product image |
 | `footer` | Optional, 0 or 1 text frame per page | DANIS ADD ON copy |
+| `subject` | Optional, red subject frames (Custom Subject Frames) | Where the product must sit — see [Step 3: Subject Placement](#step-3-subject-placement) |
 | Anything else (e.g. `shadow`) | Left untouched | — |
 
 > You can also name frames `<<Headline>>`, `<<Footer>>` and `<<MainImage>>` directly. A named frame takes priority over the layer lookup.
@@ -158,7 +159,17 @@ The prepared copy becomes the **Template Set** shown under the button. The panel
 
 > Tip: if the photo folder is already selected in step 1, the generated CSV includes image paths (`@MainImage`), which makes previewing in InDesign's Data Merge panel easier. It is not required.
 
-### Step 3: Match, Generate & Review
+### Step 3: Subject Placement
+
+Choose how the product is placed in its photo frame. The choice is remembered.
+
+**Auto Placement** (default) — the plugin finds the product in each photo (Photoshop API, through the team backend) and centres it in the free area of the image frame, clear of the headline and footer text. Nothing to set up. If a photo is busy (people and a car, or a product filling the photo), the detected subject is the whole photo and the photo is placed normally. To fine-tune one product, scale or move the image in its INDD by hand and click Commit (don't Regenerate it afterwards — that rebuilds the INDD from the template).
+
+**Custom Subject Frames** — for layouts where the product should always sit in a particular area. Click **Add Default Frames**: every layout of the Template Set gets a red frame on layer `subject`, where Auto Placement would put the subject. The template opens in InDesign; move or resize the frames there, click **Save Frame Changes** (the panel shows a yellow warning while frame changes are unsaved), then click **Generate**. Generate also saves pending changes first. Each product is scaled and centred inside its layout's red frame. **Reset Frames** puts the default frames back. The frames are non-printing and are removed from every product INDD, so they never appear in a JPG. A frame you draw yourself is recognised too: on layer `subject`, named `<<SubjectZone>>` / `subject zone` / `bounding box`, or an empty red-stroked frame on the `Image` layer.
+
+In "Custom Subject Frames" mode, a layout without a red frame uses Auto Placement. In "Auto Placement" mode, red frames in the template are ignored.
+
+### Step 4: Match, Generate & Review
 
 **Match.** Click **Match**. Every Excel row and every photo folder is listed as one block:
 
@@ -208,7 +219,7 @@ The line above the list summarises the match, e.g. `10 rows · 10 matched · 3 e
 
 The counts below the list (e.g. `6 Ready · 2 Need Review · 2 Committed`) show where the batch stands.
 
-### Step 4: Export
+### Step 5: Export
 
 Click **Export All Committed Images**. The final JPGs of every **✓ Committed** product are exported from its `.indd` (so manual edits are included) into `output/<type>/<WxH>/`, and the product becomes **✓ Exported**. Nothing is skipped for warnings here; that decision was made at Commit.
 
