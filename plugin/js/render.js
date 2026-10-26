@@ -1424,7 +1424,8 @@ function inddPathFor(rec, templatePath, outputRootPath) {
 // placeholder frame could be lost before the INDD was saved. The
 // placeholders are now unbound first, and every page is checked for a
 // placed image before saving.
-async function generateIndds(manifestRows, templatePaths, outputRootPath, onProgress) {
+//   options.textColor: { swatches } — Auto Text Color with the selected palette swatches (optional)
+async function generateIndds(manifestRows, templatePaths, outputRootPath, onProgress, options) {
     if (!templatePaths || !templatePaths.length) {
         throw new Error("No templates — prepare the client template in step 2 first.");
     }
@@ -1512,11 +1513,22 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                 imageChecks.push(...image.records);
                 if (image.report) imageReports.push(image.report);
                 for (const r of image.records) run.line(headline, `${t.name} image`, "", "info", JSON.stringify(r));
+                // Auto Text Color — AFTER the image-extension step: only pages
+                // whose image is already final now; pages that still need Image
+                // Extension keep the template colour until Extend has run.
+                let textColor = null;
+                const tcSwatches = options && options.textColor && options.textColor.swatches;
+                if (tcSwatches && tcSwatches.length) {
+                    const waitForExtension = new Set(image.records.filter((r) => r.status === "extension_required").map((r) => r.page - 1));
+                    const tc = await autoTextColorForDocument(doc, result.plan, tcSwatches, { waitForExtension });
+                    for (const r of tc) run.line(headline, `${t.name} text colour`, "", "info", r.pending ? `${r.layout}: waits for Image Extension` : r.error ? `${r.layout}: kept template colour (${r.error})` : `${r.layout}: ${r.swatch} (contrast ${r.score}; ranking ${r.ranking.join(" · ")})`);
+                    textColor = summarizeTextColors(tc);
+                }
                 await saveWhenIdle(doc, inddPath);
                 const warnings = result.reports.filter((r) => /^WARNING /.test(r)).concat(image.warnings);
                 run.success(headline, label, inddPath, "populated + validated" +
                     (warnings.length ? ` (${warnings.length} warning(s))` : ""));
-                generated.push({ rec, subType: t.subType, inddPath, warnings, image: image.summary,
+                generated.push({ rec, subType: t.subType, inddPath, warnings, image: image.summary, textColor,
                     // for the panel's status line only (Subject ✓ Detected / — Default placement)
                     subject: subject ? { detected: !!subject.box, reason: subject.box ? "" : (subject.reason || "") } : null });
             } catch (e) {
@@ -1994,6 +2006,13 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     // 4. Re-validate the whole product (original + extension), then save.
     const check = checkProductPages(doc, plan);
     const appliedAny = pages.some((p) => p.applied);
+    // Auto Text Color on the new final composition (every page — this is the
+    // step after Image Extension for the pages that waited at Generate).
+    let textColor = null;
+    const tcSwatches = options && options.textColor && options.textColor.swatches;
+    if (appliedAny && tcSwatches && tcSwatches.length) {
+        try { textColor = summarizeTextColors(await autoTextColorForDocument(doc, plan, tcSwatches)); } catch (e) {}
+    }
     if (appliedAny) await saveWhenIdle(doc);
 
     const image = check.image;
@@ -2028,7 +2047,7 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
             asset: u.pages[0].meta ? u.pages[0].meta.generatedAssetPath : null,
             expansionPixels: u.plan.expansionPixels, working: u.plan.working, version: u.pages[0].meta ? u.pages[0].meta.generationVersion : null,
             jobId: u.pages[0].meta ? u.pages[0].meta.fireflyJobId : null, error: u.pages[0].error })),
-        batchMode, warnings: check.warnings, image, newGenerations, prompt, saved: appliedAny, logLines,
+        batchMode, warnings: check.warnings, image, newGenerations, prompt, saved: appliedAny, logLines, textColor,
     };
 }
 
@@ -2048,6 +2067,158 @@ async function setExtensionVisible(item, visible) {
     let saved = false;
     if (!wasModified) { await saveWhenIdle(doc); saved = true; }
     return { warnings: check.warnings, image: check.image, saved };
+}
+
+// ---------- Auto Text Color (colorpalette.js + textcolor.js) ----------
+//
+// On the FINAL composition of each page (after placement and, later, after
+// Image Extension): the Headline/Subline frame is hidden for a moment, the
+// page is exported at low resolution to a temp JPG (image, Firefly
+// extension, shadow/gradient and template artwork — exactly what the reader
+// sees behind the text), the frame is shown again, and the area behind the
+// actual text lines is measured. Of the designer's SELECTED palette swatches
+// the one with the best readable contrast is applied to the Headline/Subline
+// — per page, so layouts can differ. No Photoshop call.
+// Never blocks: no palette / no selection / any failure → the template's own
+// text colour stays and everything else carries on. Fully automatic: the
+// only choice is which swatches are allowed (Step 1).
+
+const TEXT_COLOR_LABEL = "posterBatch.textColor";
+const TEXT_COLOR_RESOLUTION = 36; // dpi of the analysis render
+
+let _textColorMods = null;
+function textColorModules() {
+    if (_textColorMods) return _textColorMods;
+    const load = (name, check) => {
+        for (const path of ["./" + name, "./js/" + name]) {
+            try { const m = require(path); if (m && typeof m[check] === "function") return m; } catch (e) {}
+        }
+        return null;
+    };
+    const palette = load("colorpalette.js", "parseASE");
+    const color = load("textcolor.js", "chooseTextColor");
+    return (_textColorMods = palette && color ? { palette, color } : null);
+}
+
+// The area of the frame's VISIBLE text lines ([t, l, b, r], page units) —
+// tighter than the frame, which is often much taller than its text.
+function textLineBounds(frame) {
+    try {
+        const lines = frame.lines;
+        let t = Infinity, l = Infinity, b = -Infinity, r = -Infinity;
+        for (let i = 0; i < lines.length; i++) {
+            const ln = itemAt(lines, i);
+            if (!String(ln.contents || "").replace(/\s+/g, "")) continue; // \s covers \r, \n and the Unicode line/paragraph separators
+            const base = Number(ln.baseline), asc = Number(ln.ascent), desc = Number(ln.descent);
+            const x0 = Number(ln.horizontalOffset), x1 = Number(ln.endHorizontalOffset);
+            if (![base, asc, desc, x0, x1].every(isFinite)) continue;
+            t = Math.min(t, base - asc); b = Math.max(b, base + desc);
+            l = Math.min(l, x0); r = Math.max(r, x1);
+        }
+        if (isFinite(t) && b > t && r > l) return [t, l, b, r];
+    } catch (e) {}
+    return Array.from(frame.geometricBounds, Number);
+}
+
+// Renders ONE page with `hide` items hidden to a temporary low-resolution
+// JPG (TEXT_COLOR_RESOLUTION dpi) — InDesign's own rendering, so image,
+// extension, shadow/gradient and transparency appear exactly as exported —
+// reads it, deletes it immediately and decodes the pixels.
+// Returns { image, pageBounds } — restores visibility + JPG export settings.
+async function renderPageBehindText(doc, page, hide) {
+    const { app } = indesign();
+    const mods = textColorModules();
+    const st = require("uxp").storage;
+    const tmp = await st.localFileSystem.getTemporaryFolder();
+    const path = `${tmp.nativePath.replace(/\/+$/, "")}/textcolor_${Date.now()}_${Math.floor(Math.random() * 1e6)}.jpg`;
+    const prefs = app.jpegExportPreferences;
+    const saved = {};
+    for (const k of ["exportResolution", "jpegQuality", "jpegColorSpace", "jpegExportRange", "pageString"]) {
+        try { saved[k] = prefs[k]; } catch (e) {}
+    }
+    const wasVisible = hide.map((it) => { try { return it.visible; } catch (e) { return true; } });
+    try {
+        hide.forEach((it) => { try { it.visible = false; } catch (e) {} });
+        exportPageAsJPEG(doc, page, path, TEXT_COLOR_RESOLUTION);
+    } catch (e) {
+        // A failed export may still have left a partial file — remove it.
+        try { await (await st.localFileSystem.getEntryWithUrl("file:" + path)).delete(); } catch (err) {}
+        throw e;
+    } finally {
+        hide.forEach((it, i) => { try { it.visible = wasVisible[i] !== false; } catch (e) {} });
+        for (const k of Object.keys(saved)) { try { prefs[k] = saved[k]; } catch (e) {} }
+    }
+    // Read the temp JPG once, then delete it straight away — whatever happens.
+    let bytes;
+    let entry = null;
+    try {
+        entry = await st.localFileSystem.getEntryWithUrl("file:" + path);
+        bytes = await entry.read({ format: st.formats.binary });
+    } finally {
+        try { if (entry) await entry.delete(); } catch (e) {}
+    }
+    return { image: mods.color.decodeJpeg(bytes), pageBounds: Array.from(page.bounds, Number) };
+}
+
+// Document colour for a palette swatch (created once, in its own model).
+function documentColorFor(doc, swatch) {
+    const { ColorModel, ColorSpace } = indesign();
+    const name = swatch.name;
+    try {
+        const c = doc.colors.itemByName(name);
+        if (c && c.isValid) return c;
+    } catch (e) {}
+    const spec = textColorModules().palette.inDesignColor(swatch);
+    const space = spec.space === "CMYK" ? ColorSpace.CMYK : spec.space === "LAB" ? ColorSpace.LAB : ColorSpace.RGB;
+    return doc.colors.add({ name, model: ColorModel.PROCESS, space, colorValue: spec.values });
+}
+
+// Applies one swatch to the whole Headline/Subline story and records the
+// choice on the frame (script label, for traceability only).
+function applyTextColor(doc, frame, swatch, record) {
+    frame.parentStory.fillColor = documentColorFor(doc, swatch);
+    try { frame.insertLabel(TEXT_COLOR_LABEL, JSON.stringify(Object.assign({ swatch: swatch.id, name: swatch.name }, record))); } catch (e) {}
+}
+
+// Auto Text Color for every planned page of an open document.
+//   swatches: the designer's selected palette swatches (colorpalette.js)
+//   options.waitForExtension: page indices (0-based) whose image still needs
+//     Image Extension — skipped here; they get their colour after Extend
+// Returns [{ layout, swatch, score, error, pending }] — never throws.
+async function autoTextColorForDocument(doc, plan, swatches, options) {
+    const waiting = (options && options.waitForExtension) || new Set();
+    const results = [];
+    const mods = textColorModules();
+    if (!mods || !swatches || !swatches.length) return results;
+    for (const pg of plan.pages) {
+        const page = doc.pages.item(pg.index);
+        const frame = findHeadlineFrame(page);
+        const layout = `${pg.layout.key} ${pg.layout.size}`;
+        if (!frame) continue;
+        if (waiting.has(pg.index)) { results.push({ layout, pending: true }); continue; }
+        try {
+            const area = textLineBounds(frame);
+            const { image, pageBounds } = await renderPageBehindText(doc, page, [frame]);
+            const sx = image.width / (pageBounds[3] - pageBounds[1]), sy = image.height / (pageBounds[2] - pageBounds[0]);
+            const box = { x: (area[1] - pageBounds[1]) * sx, y: (area[0] - pageBounds[0]) * sy, width: (area[3] - area[1]) * sx, height: (area[2] - area[0]) * sy };
+            const best = mods.color.chooseTextColor(mods.color.sampleLuminances(image, box), swatches);
+            if (!best) { results.push({ layout, error: "no pixels behind the text" }); continue; }
+            applyTextColor(doc, frame, best.swatch, { score: best.score });
+            results.push({ layout, swatch: best.swatch.name, score: best.score,
+                ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
+        } catch (e) {
+            results.push({ layout, error: String((e && e.message) || e) }); // template colour stays
+        }
+    }
+    return results;
+}
+
+// Short summary for logs / the panel: { names: [colours used], pages }.
+function summarizeTextColors(results) {
+    const ok = (results || []).filter((r) => r.swatch);
+    const pending = (results || []).filter((r) => r.pending).length;
+    if (!ok.length && !pending) return null;
+    return { names: [...new Set(ok.map((r) => r.swatch))], pages: ok.length, waitingForExtension: pending };
 }
 
 // "danis" / "service" for a prepared template path (same rule as Render).

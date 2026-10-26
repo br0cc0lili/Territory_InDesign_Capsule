@@ -27,6 +27,9 @@ const loadErrors = [];
 try { matcher = require("./js/matcher.js"); } catch (e) { loadErrors.push("matcher.js: " + e); }
 try { render = require("./js/render.js"); } catch (e) { loadErrors.push("render.js: " + e); }
 try { datamerge = require("./js/datamerge.js"); } catch (e) { loadErrors.push("datamerge.js: " + e); }
+// Optional Auto Text Color palette reader — if it can't load, the palette row just stays empty.
+let colorpalette = null;
+try { colorpalette = require("./js/colorpalette.js"); } catch (e) { loadErrors.push("colorpalette.js: " + e); }
 
 let excelEntry = null;
 let photosEntry = null;
@@ -58,6 +61,9 @@ const el = {
     templateList: document.getElementById("template-list"),
     btnOutput: document.getElementById("btn-output"),
     outputPath: document.getElementById("output-path"),
+    btnPalette: document.getElementById("btn-palette"),
+    palettePath: document.getElementById("palette-path"),
+    paletteSwatches: document.getElementById("palette-swatches"),
     btnGenerate: document.getElementById("btn-generate"),
     btnCommitAll: document.getElementById("btn-commit-all"),
     btnExtendAll: document.getElementById("btn-extend-all"),
@@ -88,6 +94,7 @@ const STORE = {
     photos: "posterBatch.photosPath",
     output: "posterBatch.outputPath",
     templates: "posterBatch.templatePaths",
+    palette: "posterBatch.palette", // { path, selected: [swatch ids] } — Auto Text Color
     statuses: "posterBatch.inddStatuses",
 };
 
@@ -159,6 +166,7 @@ async function restoreSelections() {
     photosEntry = await entryFor(recall(STORE.photos));
     if (photosEntry) el.photosPath.textContent = photosEntry.nativePath;
     outputEntry = await entryFor(recall(STORE.output));
+    await restorePalette();
     const paths = recall(STORE.templates) || [];
     templatePaths = [];
     // One template set; older versions may have stored several — keep the last.
@@ -487,6 +495,10 @@ function resetPanel() {
         try { localStorage.removeItem(key); } catch (e) {}
     }
     excelEntry = photosEntry = outputEntry = null;
+    palette = null;
+    paletteSelected = [];
+    paletteExpanded = false;
+    renderPalette();
     manifestRows = [];
     templatePaths = [];
     products = new Map();
@@ -548,6 +560,97 @@ el.btnPhotos.addEventListener("click", async () => {
     remember(STORE.photos, entry.nativePath);
     el.photosPath.textContent = entry.nativePath;
     updateButtons();
+});
+
+// ---------- step 1: color palette (optional, Auto Text Color) ----------
+//
+// An .ase palette; the selected swatches are the ONLY colours Auto Text
+// Color may use for Headline/Subline. No palette or nothing selected → the
+// template's own text colours are kept. Everything after this is automatic
+// (render.js, per page, on the final composition).
+
+let palette = null;          // { path, name, swatches } (colorpalette.js)
+let paletteSelected = [];    // selected swatch ids
+let paletteExpanded = false; // all swatches shown, or the first few
+const PALETTE_VISIBLE = 5;
+
+function rememberPalette() {
+    remember(STORE.palette, palette ? { path: palette.path, selected: paletteSelected } : null);
+}
+
+// The selected swatches, for render.js ({ swatches } or null).
+function textColorOptions() {
+    if (!palette || !colorpalette) return null;
+    const swatches = colorpalette.selectedSwatches(palette, paletteSelected);
+    return swatches.length ? { swatches } : null;
+}
+
+function renderPalette() {
+    el.paletteSwatches.innerHTML = "";
+    if (!palette) {
+        el.btnPalette.textContent = "Select Color Palette…";
+        el.palettePath.textContent = "Optional — template text colours are kept";
+        return;
+    }
+    el.btnPalette.textContent = "Change…";
+    const n = paletteSelected.length;
+    el.palettePath.textContent = `${palette.name} · ${n ? n + " selected" : "none selected — template colours kept"}`;
+    const list = paletteExpanded ? palette.swatches : palette.swatches.slice(0, PALETTE_VISIBLE);
+    for (const sw of list) {
+        const b = document.createElement("div");
+        b.className = "swatch" + (paletteSelected.indexOf(sw.id) !== -1 ? " selected" : "");
+        b.style.backgroundColor = sw.hex;
+        b.title = sw.name;
+        b.addEventListener("click", () => {
+            const i = paletteSelected.indexOf(sw.id);
+            if (i === -1) paletteSelected.push(sw.id); else paletteSelected.splice(i, 1);
+            rememberPalette();
+            renderPalette();
+        });
+        el.paletteSwatches.appendChild(b);
+    }
+    const hidden = palette.swatches.length - PALETTE_VISIBLE;
+    if (hidden > 0) {
+        const more = document.createElement("div");
+        more.className = "swatch-more";
+        more.textContent = paletteExpanded ? "less" : `+${hidden}`;
+        more.title = paletteExpanded ? "Show fewer swatches" : "Show all swatches";
+        more.addEventListener("click", () => { paletteExpanded = !paletteExpanded; renderPalette(); });
+        el.paletteSwatches.appendChild(more);
+    }
+}
+
+async function loadPaletteFrom(path, selected) {
+    palette = await colorpalette.loadPalette(path);
+    const ids = new Set(palette.swatches.map((x) => x.id));
+    paletteSelected = (selected || []).filter((id) => ids.has(id));
+    rememberPalette();
+    renderPalette();
+}
+
+async function restorePalette() {
+    const saved = recall(STORE.palette);
+    if (!saved || !saved.path || !colorpalette || !(await entryFor(saved.path))) { renderPalette(); return; }
+    try { await loadPaletteFrom(saved.path, saved.selected); } catch (e) { palette = null; renderPalette(); }
+}
+
+el.btnPalette.addEventListener("click", async () => {
+    if (!colorpalette) { el.palettePath.textContent = "colorpalette.js failed to load — see the banner above."; return; }
+    let entry;
+    try {
+        entry = await fs.getFileForOpening({ types: ["ase"] });
+    } catch (e) {
+        el.palettePath.textContent = errorText(e);
+        return;
+    }
+    if (!entry) return;
+    try {
+        await loadPaletteFrom(entry.nativePath, []);
+    } catch (e) {
+        palette = null;
+        renderPalette();
+        el.palettePath.textContent = "Couldn't read the palette: " + errorText(e) + " — template text colours are kept";
+    }
 });
 
 // ---------- step 2: template (prepare) ----------
@@ -997,7 +1100,7 @@ async function runGenerate(rows, title) {
     try {
         if (!(await waitForInDesign())) throw new Error(NOT_READY);
         const result = await render.generateIndds(rows, templatePaths, outputEntry.nativePath,
-            progressTo(channels.generate));
+            progressTo(channels.generate), { textColor: textColorOptions() });
         recordGeneration(result);
         await refreshProducts();
         return result;
@@ -1183,7 +1286,7 @@ async function extendRow(rec, mode, prompt) {
     try {
         if (!(await waitForInDesign())) throw new Error(NOT_READY);
         const result = await render.extendProductImage(item, outputEntry.nativePath, choice, progressTo(channels.generate),
-            { prompt });
+            { prompt, textColor: textColorOptions() });
         try {
             await render.writeLog(result.logLines, outputEntry.nativePath + "/image_extension_apply_log.jsonl");
         } catch (e) {}
@@ -1259,7 +1362,7 @@ el.btnExtendAll.addEventListener("click", async () => {
             renderTable();
             try {
                 const result = await render.extendProductImage(itemFor(rec), outputEntry.nativePath, "extend", null,
-                    { prompt, background: true });
+                    { prompt, background: true, textColor: textColorOptions() });
                 log.push(...result.logLines);
                 const msg = recordExtendResult(rec, previous, result, "extend");
                 if (result.pages.some((x) => x.applied)) extended++; else failed++;
