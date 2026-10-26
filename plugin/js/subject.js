@@ -13,6 +13,10 @@
 // file type, network, timeout, empty mask) returns { box: null, reason } and
 // placement falls back to its normal behaviour. One detection per photo per
 // run (cached), shared by every page and template of the product.
+//
+// Choose Subject (below): detectSubjectObjects() finds every object of a
+// photo separately; the designer's pick (subject_choices.json) replaces the
+// automatic box for that photo.
 
 /* global require, fetch */
 
@@ -70,12 +74,14 @@ async function detectSubjectBox(imagePath, cfg) {
 // Connection from plugin/backend.config.json (the same file Image Extension
 // uses): { config: { baseUrl, pluginKey } | null, reason }. Off when the file
 // is missing / disabled, or "subjectDetection": false.
-async function loadSubjectConfig() {
+//   options.forObjects: Choose Subject (object detection) — not switched off
+//   by "subjectDetection": false, which only concerns the automatic box
+async function loadSubjectConfig(options) {
     try {
         const folder = await require("uxp").storage.localFileSystem.getPluginFolder();
         const cfg = JSON.parse(await (await folder.getEntry("backend.config.json")).read());
         if (!cfg || cfg.enabled === false) return { config: null, reason: "backend disabled in backend.config.json" };
-        if (cfg.subjectDetection === false) return { config: null, reason: "subject detection disabled in backend.config.json" };
+        if (cfg.subjectDetection === false && !(options && options.forObjects)) return { config: null, reason: "subject detection disabled in backend.config.json" };
         if (!/^https:\/\//.test(String(cfg.baseUrl || "")) || !cfg.pluginKey) return { config: null, reason: "backend.config.json needs an https baseUrl and a pluginKey" };
         return { config: { baseUrl: String(cfg.baseUrl).replace(/\/+$/, ""), pluginKey: String(cfg.pluginKey) }, reason: "" };
     } catch (e) {
@@ -83,21 +89,140 @@ async function loadSubjectConfig() {
     }
 }
 
+// ---------- Choose Subject: several objects per photo ----------
+//
+// remove-background keeps EVERYTHING in front as one mask — with a person
+// next to a car, or a product filling the photo, the box is the whole photo.
+// mask-objects (backend: subject-objects / subject-objects-status) finds
+// each object separately with a label and a box; the designer ticks the
+// one(s) that should go into the red subject frame (⋯ → Choose Subject).
+// The choice is stored per photo in <output>/subject_choices.json and used
+// by every page and template of that product, instead of the automatic box.
+
+const CHOICES = { file: "subject_choices.json", version: 1, objectsTimeoutMs: 120000 };
+
+// A box spanning (nearly) the whole photo on BOTH axes says nothing about
+// where the subject is (same limit as placement.js maxInformativeSpan).
+function isWholePhotoBox(box, span) {
+    const s = span || 0.95;
+    return !!box && Number(box.width) >= s && Number(box.height) >= s;
+}
+
+// PURE. The smallest box around the chosen objects (shares 0..1), or null.
+//   objects: [{ id, box: { x, y, width, height } }]; ids: chosen ids
+function unionBox(objects, ids) {
+    const chosen = (objects || []).filter((o) => o && o.box && (ids || []).indexOf(o.id) !== -1);
+    if (!chosen.length) return null;
+    const x0 = Math.min(...chosen.map((o) => o.box.x));
+    const y0 = Math.min(...chosen.map((o) => o.box.y));
+    const x1 = Math.max(...chosen.map((o) => o.box.x + o.box.width));
+    const y1 = Math.max(...chosen.map((o) => o.box.y + o.box.height));
+    const r = (v) => Math.round(Math.min(1, Math.max(0, v)) * 10000) / 10000;
+    return { x: r(x0), y: r(y0), width: r(x1 - x0), height: r(y1 - y0) };
+}
+
+// Every object of one photo: { objects: [{ id, label, score, box }], debug, seconds }.
+// Throws on backend / network problems (the picker shows the message).
+async function detectSubjectObjects(imagePath, cfg) {
+    const started = Date.now();
+    const ext = String(imagePath).split(".").pop().toLowerCase();
+    const contentType = CONFIG.contentTypes[ext];
+    if (!contentType) throw new Error(`.${ext} photos can't be analysed — use JPG or PNG`);
+    const target = await post(cfg, "subject-upload-url", { contentType });
+    const storage = require("uxp").storage;
+    const entry = await storage.localFileSystem.getEntryWithUrl("file:" + imagePath);
+    const bytes = await entry.read({ format: storage.formats.binary });
+    const put = await fetch(target.uploadUrl, { method: "PUT", headers: target.uploadHeaders, body: bytes });
+    if (!put.ok) throw new Error(`photo upload failed (HTTP ${put.status})`);
+    const job = await post(cfg, "subject-objects", { storagePath: target.storagePath, contentType });
+    for (;;) {
+        const st = await post(cfg, "subject-objects-status",
+            { jobId: job.jobId, statusUrl: job.statusUrl, workPath: job.workPath, sentSize: job.sentSize });
+        if (st.status === "succeeded") {
+            // debug: the response's shape when no object could be read (no URLs).
+            return { objects: Array.isArray(st.objects) ? st.objects : [], debug: st.debug || "",
+                seconds: Math.round((Date.now() - started) / 1000) };
+        }
+        if (st.status === "failed" || st.status === "canceled" || st.status === "cancelled") {
+            throw new Error(`object detection ${st.status}: ${st.error || "no details"}`);
+        }
+        if (Date.now() - started > CHOICES.objectsTimeoutMs) throw new Error("object detection timed out");
+        await sleep(CONFIG.pollIntervalMs);
+    }
+}
+
+// Photo identity for the choices file: path + size + modification time, so a
+// replaced photo (same name, new content) doesn't reuse an old choice.
+async function photoKey(imagePath) {
+    let size = "", modified = "";
+    try {
+        const entry = await require("uxp").storage.localFileSystem.getEntryWithUrl("file:" + imagePath);
+        const meta = await entry.getMetadata();
+        size = meta.size || "";
+        modified = meta.dateModified ? new Date(meta.dateModified).getTime() : "";
+    } catch (e) {}
+    return `${String(imagePath).toLowerCase()}|${size}|${modified}`;
+}
+
+// <output>/subject_choices.json → { path, items: { [photoKey]: entry } }
+//   entry: { imagePath, objects, selected: [ids] | null, detectedAt, chosenAt }
+async function loadSubjectChoices(outputRoot) {
+    const path = String(outputRoot).replace(/[\/\\]+$/, "") + "/" + CHOICES.file;
+    try {
+        const entry = await require("uxp").storage.localFileSystem.getEntryWithUrl("file:" + path);
+        const json = JSON.parse(await entry.read());
+        if (json && json.version === CHOICES.version && json.items && typeof json.items === "object") return { path, items: json.items };
+    } catch (e) {}
+    return { path, items: {} };
+}
+
+async function saveSubjectChoices(store) {
+    const storage = require("uxp").storage;
+    const file = await storage.localFileSystem.createEntryWithUrl("file:" + store.path, { type: storage.types.file, overwrite: true });
+    await file.write(JSON.stringify({ version: CHOICES.version, items: store.items }, null, 1));
+}
+
+// PURE. The chosen box of a stored entry: { box, labels } or null.
+function chosenSubject(entry) {
+    if (!entry || !Array.isArray(entry.selected) || !entry.selected.length) return null;
+    const box = unionBox(entry.objects, entry.selected);
+    if (!box) return null;
+    const labels = (entry.objects || []).filter((o) => entry.selected.indexOf(o.id) !== -1).map((o) => o.label);
+    return { box, labels };
+}
+
 // A detector for one run: caches per photo, never throws.
-//   cfg: backend config or null (→ every call returns { box: null, reason })
-function createSubjectDetector(cfg, reasonIfOff) {
+//   cfg: backend config or null (→ every automatic detection returns { box: null, reason })
+//   choices: loadSubjectChoices() result or null — a photo with a choice uses
+//            it (source "chosen") and is not sent to remove-background
+// Results: { box, source: "photoshop-mask"|"chosen", wholePhoto, labels?, reason? }
+function createSubjectDetector(cfg, reasonIfOff, choices) {
     const cache = new Map();
+    const hasChoices = !!(choices && choices.items && Object.keys(choices.items).some((k) => chosenSubject(choices.items[k])));
+    async function run(imagePath) {
+        if (hasChoices) {
+            const picked = chosenSubject(choices.items[await photoKey(imagePath)]);
+            if (picked) return { box: picked.box, source: "chosen", labels: picked.labels, wholePhoto: isWholePhotoBox(picked.box) };
+        }
+        if (!cfg) return { box: null, reason: reasonIfOff || "subject detection off" };
+        const r = await detectSubjectBox(imagePath, cfg);
+        if (r.box) r.wholePhoto = isWholePhotoBox(r.box);
+        return r;
+    }
     return {
         enabled: !!cfg,
+        hasChoices,
         detect(imagePath) {
-            if (!cfg) return Promise.resolve({ box: null, reason: reasonIfOff || "subject detection off" });
             const key = String(imagePath).toLowerCase();
             if (!cache.has(key)) {
-                cache.set(key, detectSubjectBox(imagePath, cfg).catch((e) => ({ box: null, reason: String((e && e.message) || e) })));
+                cache.set(key, run(imagePath).catch((e) => ({ box: null, reason: String((e && e.message) || e) })));
             }
             return cache.get(key);
         },
     };
 }
 
-module.exports = { CONFIG, loadSubjectConfig, detectSubjectBox, createSubjectDetector };
+module.exports = {
+    CONFIG, loadSubjectConfig, detectSubjectBox, createSubjectDetector,
+    CHOICES, isWholePhotoBox, unionBox, chosenSubject, detectSubjectObjects, photoKey, loadSubjectChoices, saveSubjectChoices,
+};

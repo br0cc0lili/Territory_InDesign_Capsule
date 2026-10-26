@@ -99,7 +99,16 @@ A `⚠` next to a page explains what's missing, e.g. a layer or frame. Fix it in
 
 **One type at a time:** the panel works with either DANIS **or** Service. To switch, open the other client template and click Prepare again.
 
-### Step 3: Match, Generate & Review
+### Step 3: Subject Placement
+
+Pick one of two options:
+
+- **Auto Placement** — nothing to do. Each product is found in its photo and put in the middle of the empty part of the picture, never under the text.
+- **Custom Subject Frames** — click **Add Default Frames**. The template opens with a red frame on every page. Move or resize the red frames to where the product should go, click **Save Frame Changes**, then click **Generate**. While a change isn't saved yet, the panel shows a yellow reminder. The red frames never appear in the final images. **Reset Frames** brings the default frames back.
+
+Want to change just one product? Open its INDD, scale or move the photo by hand, then click **Commit**.
+
+### Step 4: Match, Generate & Review
 
 **Match.** Click **Match**. Every product from the Excel sheet appears in a list:
 
@@ -127,7 +136,7 @@ While a product's InDesign file is the document in front, the panel also shows i
 
 **Commit All Ready .indd** commits every product marked **✓ Ready** in one click. Products with warnings are skipped. Check those, then commit them one by one. If you commit a product that still has warnings, the panel lists them and asks **Commit Anyway?**
 
-### Step 4: Export
+### Step 5: Export
 
 Click **Export All Committed Images**. The final poster images of every **✓ Committed** product are exported, including any changes you made in the InDesign files.
 

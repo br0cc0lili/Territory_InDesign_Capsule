@@ -40,13 +40,41 @@
         <div class="path-line"><span class="path-caption">Template Set:</span> <span id="template-list" class="path-label">None yet — open the client template and prepare it</span></div>
         <div id="dm-summary" class="summary"></div>
     </section>
+    <section class="step">
+        <h2>3. Subject Placement</h2>
+        <div id="mode-auto" class="mode-option mode-selected" data-mode="auto">
+            <div class="mode-radio"></div>
+            <div class="mode-text">
+                <div class="mode-title">Auto Placement</div>
+                <div class="hint">Finds the product in each photo and centres it in the free area of the layout, clear of the text.</div>
+            </div>
+        </div>
+        <div id="mode-frames" class="mode-option" data-mode="frames">
+            <div class="mode-radio"></div>
+            <div class="mode-text">
+                <div class="mode-title">Custom Subject Frames</div>
+                <div class="hint">Adds a red frame to each layout of the template. Move or resize it, click Save Frame Changes, then generate — the product is placed inside it. The frame never appears in the JPGs.</div>
+            </div>
+        </div>
+        <div id="frames-actions" class="frames-actions hidden">
+            <div class="frames-steps">
+                <div class="frames-step"><span class="frames-num">1</span><button id="btn-add-frames" class="btn-small">Add Default Frames</button></div>
+                <div class="frames-step"><span class="frames-num">2</span><span class="frames-text">Move or resize the red frames in the template</span></div>
+                <div class="frames-step"><span class="frames-num">3</span><button id="btn-save-frames" class="btn-small">Save Frame Changes</button></div>
+                <div class="frames-step"><span class="frames-num">4</span><span class="frames-text">Generate (step 4)</span></div>
+            </div>
+            <div id="frames-unsaved" class="frames-unsaved hidden">⚠ The red frames have unsaved changes — click Save Frame Changes.</div>
+            <div class="actions"><button id="btn-reset-frames" class="btn-small btn-quiet">Reset Frames</button></div>
+        </div>
+        <div id="frames-summary" class="summary"></div>
+    </section>
     <section class="step step-last">
-        <h2>3. Match, Generate &amp; Review</h2>
+        <h2>4. Match, Generate &amp; Review</h2>
         <div class="actions">
             <button id="btn-match" disabled>Match</button>
             <button id="btn-generate" disabled>Generate All .indd</button>
         </div>
-        <!-- Step 3 progress: only while Generate / Regenerate / Commit runs. -->
+        <!-- Step 4 progress: only while Generate / Regenerate / Commit runs. -->
         <div id="gen-progress" class="progress-hidden">
             <div id="gen-progress-label" class="progress-label"></div>
             <div class="progress-bar"><div id="gen-progress-fill" class="progress-fill"></div></div>
@@ -59,7 +87,7 @@
     </div>
 
     <!-- Always visible, outside every scroll area: the current product, the
-         step 3 batch actions and step 4 Export. -->
+         step 4 batch actions and step 5 Export. -->
     <div id="footer-bar">
         <!-- The product INDD that is InDesign's front document. -->
         <div id="active-product" class="current-product hidden">
@@ -75,7 +103,7 @@
             </div>
         </div>
         <div class="export-row">
-            <h2>4. Export</h2>
+            <h2>5. Export</h2>
             <button id="btn-export" disabled>Export All Committed Images</button>
         </div>
         <!-- Export progress: only while exporting / previewing. -->
