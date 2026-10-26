@@ -103,7 +103,7 @@ A `⚠` next to a page explains what's missing, e.g. a layer or frame. Fix it in
 
 Pick one of two options:
 
-- **Auto Placement** — nothing to do. Each product is found in its photo and put in the middle of the empty part of the picture, never under the text.
+- **Auto Placement** — nothing to do. Each product is found in its photo and put in the middle of the empty part of the picture, never under the text. A small product is enlarged so it fills about 75–80% of that empty part.
 - **Custom Subject Frames** — click **Add Default Frames**. The template opens with a red frame on every page. Move or resize the red frames to where the product should go, click **Save Frame Changes**, then click **Generate**. While a change isn't saved yet, the panel shows a yellow reminder. The red frames never appear in the final images. **Reset Frames** brings the default frames back.
 
 Want to change just one product? Open its INDD, scale or move the photo by hand, then click **Commit**.

@@ -53,7 +53,15 @@ const PLACEMENT_CONFIG = {
     // shift on that axis.
     // minFreeShare: a free band smaller than this share of the frame is
     // ignored (the frame's centre is used instead).
-    subject: { centerInExtendLayouts: true, maxInformativeSpan: 0.95, minFreeShare: 0.25 },
+    // Subject size (Auto Placement): when the subject at the normal
+    // contain-fit size spans less than minFill of the free band (its larger
+    // share of the band's width / height), the photo is enlarged so the
+    // subject spans targetFill — but never more than maxZoom × the contain-fit
+    // size. The subject stays inside the free band (clear of the text); the
+    // photo covers the frame where it can, any remaining gap is Image
+    // Extension's. minFill 0 switches the zoom off.
+    subject: { centerInExtendLayouts: true, maxInformativeSpan: 0.95, minFreeShare: 0.25,
+        minFill: 0.75, targetFill: 0.78, maxZoom: 3 },
     // Red subject frame (subjectzone.js) + subject box: planZonePlacement().
     // The photo is scaled so the subject box fits the red frame (padding =
     // inner margin as a share of the frame's width / height) and the
@@ -206,23 +214,52 @@ function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = n
         : a.vertical === "bottom" ? f.bottom - h
         : f.top + (f.height - h) / 2;
     let subjectShift = null;
+    let iw = w, ih = h;
     const sb = validSubjectBox(subjectBounds);
     if (sb && PLACEMENT_CONFIG.subject.centerInExtendLayouts) {
+        const cfg = PLACEMENT_CONFIG.subject;
         const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
         const before = { left, top };
         // only along an axis with a gap — the image never leaves the frame
-        const span = PLACEMENT_CONFIG.subject.maxInformativeSpan;
+        const span = cfg.maxInformativeSpan;
         // Free band per axis: the frame minus the text frames that overlap it.
         const overl = (avoidBounds || []).map(toBox).filter((o) => o.right > f.left && o.left < f.right && o.bottom > f.top && o.top < f.bottom);
-        const minShare = PLACEMENT_CONFIG.subject.minFreeShare;
+        const minShare = cfg.minFreeShare;
         const freeY = largestFreeInterval(f.top, f.bottom, overl.map((o) => [o.top, o.bottom]), minShare) || [f.top, f.bottom];
         const freeX = largestFreeInterval(f.left, f.right, overl.map((o) => [o.left, o.right]), minShare) || [f.left, f.right];
-        if (f.width - w > 0.01 && sb.width < span) left = clamp((freeX[0] + freeX[1]) / 2 - (sb.x + sb.width / 2) * w, f.left, f.right - w);
-        if (f.height - h > 0.01 && sb.height < span) top = clamp((freeY[0] + freeY[1]) / 2 - (sb.y + sb.height / 2) * h, f.top, f.bottom - h);
+        // Subject size: how much of the free band the subject spans at the
+        // contain-fit size; too small → enlarge (see PLACEMENT_CONFIG.subject).
+        const fw = freeX[1] - freeX[0], fh = freeY[1] - freeY[0];
+        const fill0 = Math.max((sb.width * w) / fw, (sb.height * h) / fh);
+        const informative = !(sb.width >= span && sb.height >= span);
+        let zoom = 1;
+        if (cfg.minFill > 0 && informative && fill0 > 0 && fill0 < cfg.minFill) {
+            zoom = Math.min(cfg.targetFill / fill0, cfg.maxZoom || Infinity);
+        }
+        if (zoom > 1.0001) {
+            iw = w * zoom; ih = h * zoom;
+            // One axis: subject centred in the free band and kept inside it;
+            // the photo covers the frame where that's possible too.
+            const axis = (fStart, fEnd, bStart, bEnd, size, b0, b1) => {
+                const centre = (bStart + bEnd) / 2 - ((b0 + b1) / 2) * size;
+                const keepLo = bStart - b0 * size, keepHi = bEnd - b1 * size;
+                const coverLo = size >= fEnd - fStart ? fEnd - size : fStart;
+                const coverHi = size >= fEnd - fStart ? fStart : fEnd - size;
+                const lo = Math.max(keepLo, coverLo), hi = Math.min(keepHi, coverHi);
+                return lo <= hi + 0.01 ? clamp(centre, lo, Math.max(lo, hi)) : clamp(centre, keepLo, keepHi);
+            };
+            left = axis(f.left, f.right, freeX[0], freeX[1], iw, sb.x, sb.x + sb.width);
+            top = axis(f.top, f.bottom, freeY[0], freeY[1], ih, sb.y, sb.y + sb.height);
+        } else {
+            if (f.width - w > 0.01 && sb.width < span) left = clamp((freeX[0] + freeX[1]) / 2 - (sb.x + sb.width / 2) * w, f.left, f.right - w);
+            if (f.height - h > 0.01 && sb.height < span) top = clamp((freeY[0] + freeY[1]) / 2 - (sb.y + sb.height / 2) * h, f.top, f.bottom - h);
+        }
         subjectShift = { dx: Math.round((left - before.left) * 100) / 100, dy: Math.round((top - before.top) * 100) / 100,
+            zoom: Math.round(zoom * 100) / 100,
+            fill: Math.round(Math.max((sb.width * iw) / fw, (sb.height * ih) / fh) * 100) / 100,
             freeBand: { y: freeY.map((v) => Math.round(v * 10) / 10), x: freeX.map((v) => Math.round(v * 10) / 10) } };
     }
-    return { mode: "extend", anchor: a, graphicBounds: [top, left, top + h, left + w], subjectBounds: sb, subjectShift };
+    return { mode: "extend", anchor: a, graphicBounds: [top, left, top + ih, left + iw], subjectBounds: sb, subjectShift };
 }
 
 // PURE. Placement inside the red subject frame.
@@ -391,7 +428,9 @@ function placeImageForExtension(frame, imagePath, id, policy, subjectBounds, avo
         note: `placement=extend (${fitNote}; policy ${policy.id}; anchor ${policy.anchor.vertical}/${policy.anchor.horizontal}` +
             (policy.gap ? `; ${policy.gap.axis} gap ${Math.round(policy.gap.ratio * 100)}%` : "") +
             (placementPlan.subjectShift ? `; subject-centred in free band y ${placementPlan.subjectShift.freeBand.y.join("–")}` +
-                ` dx ${placementPlan.subjectShift.dx} dy ${placementPlan.subjectShift.dy}` : "") + ")",
+                ` dx ${placementPlan.subjectShift.dx} dy ${placementPlan.subjectShift.dy}` +
+                (placementPlan.subjectShift.zoom > 1 ? `; enlarged x${placementPlan.subjectShift.zoom}` : "") +
+                `; subject fills ${Math.round(placementPlan.subjectShift.fill * 100)}% of the free band` : "") + ")",
         placementPlan,
     };
 }

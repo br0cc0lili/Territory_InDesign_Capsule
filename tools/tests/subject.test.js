@@ -3,6 +3,9 @@
 // image's position changes; never cropped; no box = exactly as before.
 const PLUGIN_JS = require("path").resolve(__dirname, "../../plugin/js");
 const pl = require(PLUGIN_JS + "/placement.js");
+// These cases check the subject SHIFT at the contain-fit size, so the
+// subject zoom (minFill) is off here — the zoom is tested in fill.test.js.
+pl.PLACEMENT_CONFIG.subject.minFill = 0;
 let f = 0; const ok = (c, m) => { console.log((c ? "PASS " : "FAIL ") + m); if (!c) f++; };
 const top = { id: "t", placementMode: "extend", anchor: { vertical: "top", horizontal: "center" } };
 const frame = [0, 0, 1200, 1200];
