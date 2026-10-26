@@ -61,6 +61,43 @@ button:disabled {
     word-break: break-all;
 }
 
+/* Color palette swatches (Step 1, Product actions): multi-select squares. */
+.swatch-row {
+    display: flex;
+    flex-wrap: wrap;
+    margin: 2px 0 4px;
+}
+
+.swatch-row:empty {
+    display: none;
+}
+
+.swatch {
+    width: 22px;
+    height: 22px;
+    margin: 0 6px 6px 0;
+    padding: 0;
+    border: 1px solid #666;
+    border-radius: 3px;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+
+.swatch.selected {
+    border: 3px solid #4d9de0;
+}
+
+/* "+9" / "less": shows all swatches or only the first few. */
+.swatch-more {
+    height: 22px;
+    line-height: 22px;
+    padding: 0 6px;
+    margin: 0 6px 6px 0;
+    font-size: 11px;
+    color: #9aa3b5;
+    cursor: pointer;
+}
+
 .hint {
     color: #9a9a9a;
     font-size: 11px;
