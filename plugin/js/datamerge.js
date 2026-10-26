@@ -484,59 +484,6 @@ function prepareFooter(doc, page, field, entry) {
         `<<${field.footer.fieldName}>> (frame by ${via})`);
 }
 
-// Turns hyphenation on for every paragraph of every text frame on the "text"
-// layer (the page's own frames and any parent-page frames), so long headline
-// words can break instead of oversetting the frame. Works on each frame's
-// STORY — frame.paragraphs only covers the visible text, and the long
-// placeholders overset the frame — and reads every paragraph back. Stories
-// shared by threaded frames are handled once. Hyphenation is a paragraph
-// attribute, so it carries over to the real text Render writes in. InDesign
-// only hyphenates with a language dictionary, so the language is reported
-// and "[No Language]" is flagged.
-function prepareHyphenation(doc, page, field, entry) {
-    const frames = itemsOnLayer(page, LAYERS.text, isTextFrame)
-        .concat(parentItemsOnLayer(page, LAYERS.text, isTextFrame));
-    if (!frames.length) {
-        entry.notes.push(`hyphenation: no text frame on layer "${LAYERS.text}"`);
-        return;
-    }
-    const seen = new Set();
-    const failed = [];
-    const languages = new Set();
-    let stories = 0, enabled = 0, alreadyOn = 0;
-    for (const frame of frames) {
-        const story = step("read story", () => frame.parentStory);
-        let id = null;
-        try { id = story.id; } catch (e) {}
-        if (id !== null) {
-            if (seen.has(id)) continue;
-            seen.add(id);
-        }
-        stories++;
-        const n = step("count paragraphs", () => story.paragraphs.length);
-        for (let i = 0; i < n; i++) {
-            try {
-                const para = story.paragraphs.item(i);
-                if (para.hyphenation === true) alreadyOn++;
-                else para.hyphenation = true;
-                // Read back from a fresh reference.
-                if (story.paragraphs.item(i).hyphenation === true) enabled++;
-                else failed.push(String(i));
-                try { languages.add(String(para.appliedLanguage.name)); } catch (e) {}
-            } catch (e) {
-                failed.push(`${i} (${e})`);
-            }
-        }
-    }
-    const langs = [...languages];
-    entry.notes.push(`hyphenation on: ${enabled} paragraph(s) in ${stories} text stor${stories === 1 ? "y" : "ies"} ` +
-        `on layer "${LAYERS.text}" (${alreadyOn} already on)` + (langs.length ? `; language: ${langs.join(", ")}` : ""));
-    if (langs.some((l) => /no language/i.test(l))) {
-        entry.notes.push(`⚠ warning: text has "[No Language]" — InDesign won't hyphenate it until a language (e.g. German) is applied`);
-    }
-    if (failed.length) throw new Error(`could not enable hyphenation for paragraph(s) ${failed.join(", ")}`);
-}
-
 function prepareImage(doc, page, field, entry) {
     const found = findImageFrame(page);
     if (found.error) throw new Error(found.error + ` — or name the image frame ${FRAME_NAMES.image}`);
@@ -803,7 +750,6 @@ async function prepareDocument(doc, csvPath) {
 
             for (const [what, step] of [
                 ["text", prepareText],
-                ["hyphenation", prepareHyphenation],
                 ["footer", prepareFooter],
                 ["image", prepareImage],
             ]) {

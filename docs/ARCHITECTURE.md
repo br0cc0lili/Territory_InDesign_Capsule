@@ -52,7 +52,7 @@ This document is for developers working on `plugin/`. It covers the tech stack, 
 - **Documents:** `saveACopy`, `open` (with a window, without a window, and with `OpenOptions.OPEN_COPY`), `save`, `close`, `modified`, `activeDocument`.
 - **Export:** `exportFile(ExportFormat.JPG)`, RGB, maximum quality; 72 dpi for final JPGs, 36 dpi for previews.
 - **Image fitting:** `FitOptions.CONTENT_AWARE_FIT` (Adobe Sensei), falling back to fill proportionally + centre.
-- **Text:** editing via story and paragraph, enabling hyphenation, overset detection (`frame.overflows`).
+- **Text:** editing via story and paragraph, hyphenation off + fit-to-frame font size for Headline/Subline (`fitHeadlineToFrame`), overset detection (`frame.overflows`).
 
 ### Permissions (`manifest.json`)
 
@@ -341,7 +341,7 @@ The roles:
 - **Footer:** layer `footer` (optional), a TextFrame. The whole frame becomes `DANIS ADD ON`, but only if the data source has that column.
 - **Main image:** layer `Image`, a Rectangle, Polygon or Oval. Becomes `@MainImage`; the sample image is removed and fitting is set to fill proportionally + centre.
 
-A missing `text` or `Image` layer is an error; a missing `footer` layer is only a warning. Prepare also turns on **hyphenation** for every paragraph on the `text` layer, and warns if the text has no language set (InDesign will not hyphenate without one).
+A missing `text` or `Image` layer is an error; a missing `footer` layer is only a warning. Hyphenation is not changed by Prepare: Render turns it **off** for the generated Headline/Subline and, if the text doesn't fit the fixed frame, reduces the HEADLINE font size to the largest size that fits (the subline keeps its template size) (binary search; frame geometry, font, alignment and tracking unchanged).
 
 ### 6.2 How later stages find frames (prepared template and product INDDs)
 
@@ -392,7 +392,7 @@ sequenceDiagram
     DM->>ID: Open the copy
     DM->>ID: selectDataSource(csv), check required fields
     loop each page
-        DM->>ID: prepareText, prepareHyphenation, prepareFooter, prepareImage
+        DM->>ID: prepareText, prepareFooter, prepareImage
     end
     DM->>ID: Save the copy (left open)
     DM-->>UI: Per-page result + copyPath

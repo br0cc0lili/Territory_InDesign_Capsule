@@ -782,6 +782,129 @@ function setHeadlineText(doc, frame, headline, subline) {
     return diag;
 }
 
+// ---------- headline + subline: fit to the fixed frame ----------
+//
+// Generated Headline/Subline text is never hyphenated (whole-word wrapping
+// only) and the frame keeps its geometry (auto-sizing off). The template's
+// font sizes stay whenever the text fits. Only when it doesn't, the HEADLINE
+// (1st non-empty paragraph) is scaled down — the subline always keeps its
+// template size. One factor for every run of the headline (fixed leading
+// scaled with it, auto leading stays auto) — the LARGEST factor that fits,
+// found by a binary search. Font, style, alignment and tracking are never
+// touched. "Fits" = no overset and no word broken across two lines.
+const TEXT_FIT = { minScale: 0.25, precisionPt: 0.1, maxSteps: 14 };
+
+// PURE. The largest scale in [minScale, 1] for which fitsAt(scale) is true,
+// assuming fitsAt is monotonic (smaller text never fits worse). 1 when the
+// text already fits; null when it doesn't fit even at minScale.
+//   maxSize: the largest original font size — the search stops once the
+//   remaining interval is below precisionPt of it.
+function largestFittingScale(fitsAt, maxSize, opts) {
+    const o = Object.assign({}, TEXT_FIT, opts || {});
+    if (fitsAt(1)) return 1;
+    if (!fitsAt(o.minScale)) return null;
+    let lo = o.minScale, hi = 1;
+    for (let i = 0; i < o.maxSteps && (hi - lo) * maxSize > o.precisionPt; i++) {
+        const mid = (lo + hi) / 2;
+        if (fitsAt(mid)) lo = mid; else hi = mid;
+    }
+    return lo;
+}
+
+// PURE. True if a word is broken across two lines: a line ending in a letter
+// or digit followed by a line starting with one (a break at a space, an
+// existing hyphen/dash or a paragraph end is a normal whole-word break).
+// (Explicit Latin/Cyrillic letter ranges incl. umlauts and ß — no \p{…}, which
+// not every UXP engine supports.)
+const WORD_END = /[0-9A-Za-zÀ-ɏЀ-ӿ]$/;
+const WORD_START = /^[0-9A-Za-zÀ-ɏЀ-ӿ]/;
+function wordSplitAcrossLines(lineTexts) {
+    for (let i = 0; i + 1 < lineTexts.length; i++) {
+        if (WORD_END.test(String(lineTexts[i])) && WORD_START.test(String(lineTexts[i + 1]))) return true;
+    }
+    return false;
+}
+
+const round1 = (n) => Math.round(n * 10) / 10;
+
+// Hyphenation off, auto-sizing off, then the largest font size that fits.
+// Returns { scale, fits, from, to, note } — never throws: if the DOM refuses
+// a step, the template sizes are restored and the note says why.
+function fitHeadlineToFrame(frame) {
+    let restore = null;
+    try {
+        return fitHeadlineToFrameUnsafe(frame, (fn) => { restore = fn; });
+    } catch (e) {
+        try { if (restore) restore(); } catch (err) {}
+        return { scale: 1, fits: !oversets(frame), note: "text fitting unavailable (" + String((e && e.message) || e).replace(/,/g, ";") + ") — template size kept" };
+    }
+}
+
+function fitHeadlineToFrameUnsafe(frame, onRestore) {
+    const { Leading, AutoSizingTypeEnum } = indesign();
+    const story = frame.parentStory;
+    try { story.hyphenation = false; } catch (e) {}
+    for (let i = 0; i < story.paragraphs.length; i++) {
+        try { story.paragraphs.item(i).hyphenation = false; } catch (e) {}
+    }
+    try {
+        const prefs = frame.textFramePreferences;
+        if (AutoSizingTypeEnum && prefs.autoSizingType !== AutoSizingTypeEnum.OFF) prefs.autoSizingType = AutoSizingTypeEnum.OFF;
+    } catch (e) {}
+
+    // Original size + leading of every style run of the HEADLINE paragraph,
+    // by character range (story indices). The subline is never resized.
+    const runs = [];
+    const idx = nonEmptyParagraphs(story);
+    if (!idx.length) return { scale: 1, fits: !oversets(frame), note: "no headline text" };
+    const tsr = story.paragraphs.item(idx[0]).textStyleRanges;
+    for (let i = 0; i < tsr.length; i++) {
+        const r = itemAt(tsr, i);
+        const n = r.characters.length;
+        if (!n) continue;
+        const leading = r.leading;
+        const auto = (Leading && leading === Leading.AUTO) || typeof leading !== "number" || leading > 5000;
+        runs.push({ start: r.characters.item(0).index, end: r.characters.item(n - 1).index, size: Number(r.pointSize), leading: auto ? null : Number(leading) });
+    }
+    const maxSize = Math.max(...runs.map((r) => r.size).filter(isFinite), 0);
+    if (!runs.length || !maxSize) return { scale: 1, fits: !oversets(frame), note: "no headline text runs" };
+
+    let applied = 1;
+    const apply = (scale) => {
+        if (scale === applied) return;
+        for (const r of runs) {
+            const range = story.characters.itemByRange(r.start, r.end);
+            // scale 1 = the exact template values (no rounding)
+            range.pointSize = scale === 1 ? r.size : round1(r.size * scale);
+            if (r.leading !== null) range.leading = scale === 1 ? r.leading : round1(r.leading * scale);
+        }
+        applied = scale;
+    };
+    onRestore(() => { applied = null; apply(1); });
+    const fitsNow = () => {
+        try { story.recompose(); } catch (e) {}
+        if (oversets(frame)) return false;
+        const lines = [];
+        try { for (let i = 0; i < frame.lines.length; i++) lines.push(String(itemAt(frame.lines, i).contents)); } catch (e) {}
+        return !wordSplitAcrossLines(lines);
+    };
+    const fitsAt = (scale) => { apply(scale); return fitsNow(); };
+
+    const best = largestFittingScale(fitsAt, maxSize);
+    const from = round1(maxSize);
+    if (best === null) {
+        apply(1); // doesn't fit even at the minimum: keep the template size, Review flags it
+        try { story.recompose(); } catch (e) {}
+        return { scale: 1, fits: false, from, to: from,
+            note: `text doesn't fit its frame even at ${round1(maxSize * TEXT_FIT.minScale)} pt — template size kept` };
+    }
+    apply(best);
+    try { story.recompose(); } catch (e) {}
+    if (best === 1) return { scale: 1, fits: true, from, to: from, note: `fits at the template size (${from} pt)` };
+    return { scale: best, fits: true, from, to: round1(maxSize * best),
+        note: `reduced ${from} → ${round1(maxSize * best)} pt (${Math.round(best * 100)} %) to fit the frame` };
+}
+
 // ---------- footer ----------
 
 // Whole <<Footer>> text (from its first non-empty paragraph on) -> `text`,
@@ -1214,6 +1337,12 @@ function populateDocument(doc, t, rec, subject, options) {
         const where = `${pg.layout.key} ${pg.layout.size} (page ${pg.index + 1})`;
         try {
             const textDiag = setHeadlineText(doc, findHeadlineFrame(page), rec.headline, subline);
+            // No hyphenation; template size, or the largest size that fits.
+            // Overset is flagged by validatePage(); a word broken across
+            // lines (no overset) only here.
+            const fit = fitHeadlineToFrame(findHeadlineFrame(page));
+            const brokenWord = !fit.fits && !oversets(findHeadlineFrame(page));
+            reports.push(`${brokenWord ? "WARNING " : ""}${where} text fit: ${fit.note}${brokenWord ? " (a word is broken across lines)" : ""}`);
             const footerFrame = findFooterFrame(page);
             const footerDiag = footerFrame ? setFooterText(doc, footerFrame, rec.danis_addon || "") : "";
             const imageFrame = findImageFrame(page);
@@ -1628,12 +1757,13 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                 if (image.report) imageReports.push(image.report);
                 for (const r of image.records) run.line(headline, `${t.name} image`, "", "info", JSON.stringify(r));
                 // Auto Text Color — AFTER the image-extension step: only pages
-                // whose image is already final now; pages that still need Image
-                // Extension keep the template colour until Extend has run.
+                // whose image already covers its frame; every other page (also
+                // over the automatic limit) keeps the template colour until
+                // Extend has run.
                 let textColor = null;
                 const tcSwatches = options && options.textColor && options.textColor.swatches;
                 if (tcSwatches && tcSwatches.length) {
-                    const waitForExtension = new Set(image.records.filter((r) => r.status === "extension_required").map((r) => r.page - 1));
+                    const waitForExtension = pagesAwaitingExtension(image.records);
                     const tc = await autoTextColorForDocument(doc, result.plan, tcSwatches, { waitForExtension });
                     for (const r of tc) run.line(headline, `${t.name} text colour`, "", "info", r.pending ? `${r.layout}: waits for Image Extension` : r.error ? `${r.layout}: kept template colour (${r.error})` : `${r.layout}: ${r.swatch} (contrast ${r.score}; ranking ${r.ranking.join(" · ")})`);
                     textColor = summarizeTextColors(tc);
@@ -2131,12 +2261,14 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     // 4. Re-validate the whole product (original + extension), then save.
     const check = checkProductPages(doc, plan);
     const appliedAny = pages.some((p) => p.applied);
-    // Auto Text Color on the new final composition (every page — this is the
-    // step after Image Extension for the pages that waited at Generate).
+    // Auto Text Color on the new final composition — the step after Image
+    // Extension for the pages that waited at Generate. A page that is still
+    // not covered (its extension failed / wasn't possible) keeps waiting.
     let textColor = null;
     const tcSwatches = options && options.textColor && options.textColor.swatches;
     if (appliedAny && tcSwatches && tcSwatches.length) {
-        try { textColor = summarizeTextColors(await autoTextColorForDocument(doc, plan, tcSwatches)); } catch (e) {}
+        const waitForExtension = pagesAwaitingExtension(pages.filter((p) => !p.applied).map((p) => p.record));
+        try { textColor = summarizeTextColors(await autoTextColorForDocument(doc, plan, tcSwatches, { waitForExtension })); } catch (e) {}
     }
     if (appliedAny) await saveWhenIdle(doc);
 
@@ -2338,6 +2470,14 @@ async function autoTextColorForDocument(doc, plan, swatches, options) {
     return results;
 }
 
+// PURE. Page indices (0-based) whose image doesn't cover its frame yet —
+// from analyzeImageCoverage() records. Auto Text Color waits there, so a
+// colour is never judged against the uncovered strip (whatever the page's
+// status: extension_required, over the limit, …).
+function pagesAwaitingExtension(records) {
+    return new Set((records || []).filter((r) => r && (r.needsExtension || r.status === "extension_required")).map((r) => r.page - 1));
+}
+
 // Short summary for logs / the panel: { names: [colours used], pages }.
 function summarizeTextColors(results) {
     const ok = (results || []).filter((r) => r.swatch);
@@ -2515,4 +2655,5 @@ module.exports = {
     isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
     addDefaultSubjectFrames, templateState, saveTemplate,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
+    pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, fitHeadlineToFrame,
 };
