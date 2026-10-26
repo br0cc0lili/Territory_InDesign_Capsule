@@ -46,4 +46,14 @@ ok(Math.abs(tc.contrastRatio(tc.relativeLuminance(255, 255, 255), tc.relativeLum
 ok(tc.chooseTextColor(new Float32Array(0), cand) === null && tc.chooseTextColor(tc.sampleLuminances(bg([0, 0, 0]), { x: 0, y: 0, width: 40, height: 20 }), []) === null, "no pixels / no candidates → null (template colour kept)");
 const part = tc.sampleLuminances(bg([0, 0, 0], 100, 100), { x: 90, y: 90, width: 50, height: 50 });
 ok(part.length === 100, "text box clipped to the rendered page");
+
+// Order: text colour only where the image already covers its frame
+const render = require(PLUGIN_JS + "/render.js");
+const waiting = render.pagesAwaitingExtension([
+    { page: 1, status: "not_required", needsExtension: false },
+    { page: 2, status: "extension_required", needsExtension: true },
+    { page: 3, status: "needs_review", needsExtension: true, overridable: true },
+    { page: 4, status: "needs_review", needsExtension: false },
+]);
+ok(waiting.has(1) && waiting.has(2) && !waiting.has(0) && !waiting.has(3), "covered page coloured now; uncovered pages (also over the limit) wait for Extend");
 console.log(f ? f + " FAILED" : "all passed");
