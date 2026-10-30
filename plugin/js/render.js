@@ -251,6 +251,37 @@ function findHeadlineFrame(page) { return findNamed(page, FRAME_NAMES.text, isTe
 function findFooterFrame(page) { return findNamed(page, FRAME_NAMES.footer, isTextFrame); }
 function findImageFrame(page) { return findNamed(page, FRAME_NAMES.image, (it) => !isTextFrame(it)); }
 
+// The area of a text frame the subject should stay clear of (Auto
+// Placement): only the part its text actually uses — the lines' bounds
+// (placement.js textBoundsFromLines), not the empty rest of the frame. The
+// whole frame when it has a visible fill (a coloured band), is rotated /
+// sheared, or the lines can't be measured. null = no visible text.
+// Returns { bounds, trimmed }.
+function textAvoidBounds(frame) {
+    const whole = Array.from(frame.geometricBounds, Number);
+    try {
+        const pl = placementModule();
+        if (!pl.PLACEMENT_CONFIG.text || !pl.PLACEMENT_CONFIG.text.trimToLines) return { bounds: whole, trimmed: false };
+        let filled = false;
+        try { filled = !!frame.fillColor && frame.fillColor.name !== "None" && Number(frame.fillTint) !== 0; } catch (e) {}
+        const angle = Math.abs(Number(frame.absoluteRotationAngle) || 0) + Math.abs(Number(frame.absoluteShearAngle) || 0);
+        if (filled || angle > 0.01) return { bounds: whole, trimmed: false };
+        const lines = frame.lines;
+        const boxes = [];
+        for (let i = 0; i < lines.length; i++) {
+            const ln = lines.item(i);
+            if (!String(ln.contents || "").trim()) continue;
+            const base = Number(ln.baseline), x0 = Number(ln.horizontalOffset), x1 = Number(ln.endHorizontalOffset);
+            boxes.push({ top: base - Number(ln.ascent), bottom: base + Number(ln.descent), left: Math.min(x0, x1), right: Math.max(x0, x1) });
+        }
+        if (!boxes.length) return { bounds: null, trimmed: true };
+        const b = pl.textBoundsFromLines(boxes, whole);
+        return b ? { bounds: b, trimmed: true } : { bounds: whole, trimmed: false };
+    } catch (e) {
+        return { bounds: whole, trimmed: false };
+    }
+}
+
 // Shared DANIS/Service rule (templatetype.js). Loaded lazily, module-relative
 // path first, plugin-root path second: no other module here loads a sibling
 // yet, and index.js documents root-anchored require() resolution for itself,
@@ -1019,9 +1050,10 @@ function placeProductImage(frame, imagePath, layout, subjectBox, avoidBounds, zo
         return Object.assign(normal, { warnings: (normal.warnings || []).concat(["the red subject frame lies outside the image frame — normal placement used"]) });
     }
     if (policy.placementMode === "extend") {
+        const placed = placement.placeImageForExtension(frame, imagePath, indesign(), policy, subjectBox || null, avoidBounds || null);
         return { mode: "extend", allowExtension: true, policy,
             subject: subjectBox || null,
-            note: placement.placeImageForExtension(frame, imagePath, indesign(), policy, subjectBox || null, avoidBounds || null).note };
+            note: placed.note, notes: placed.notes || [] };
     }
     return { mode: "fill", allowExtension: false, policy, note: placeImageFill(frame, imagePath) + ` (policy ${policy.id}` +
         (policy.gap ? `; ${policy.gap.axis} gap ${Math.round(policy.gap.ratio * 100)}% > limit` : "") + ")" };
@@ -1347,9 +1379,10 @@ function populateDocument(doc, t, rec, subject, options) {
             const footerDiag = footerFrame ? setFooterText(doc, footerFrame, rec.danis_addon || "") : "";
             const imageFrame = findImageFrame(page);
             if (!imageFrame) throw new Error(`no ${FRAME_NAMES.image} frame`);
-            // Text over the image (headline / footer): a subject is centred outside it.
-            const avoid = [findHeadlineFrame(page), footerFrame].filter(Boolean)
-                .map((f) => Array.from(f.geometricBounds, Number));
+            // Text over the image (headline / footer): a subject is centred
+            // outside it — outside the area the text actually uses.
+            const textAreas = [findHeadlineFrame(page), footerFrame].filter(Boolean).map(textAvoidBounds);
+            const avoid = textAreas.map((a) => a.bounds).filter(Boolean);
             // Red subject frame (read fresh from this page) — Custom Subject
             // Frames only. Used with a real subject box: a chosen one, or a
             // detected one that doesn't just cover the whole photo.
@@ -1373,7 +1406,7 @@ function populateDocument(doc, t, rec, subject, options) {
                 avoid, zone && usableBox ? zone.bounds : null);
             for (const w of placed.warnings || []) reports.push(`WARNING ${where}: ${w}`);
             for (const n of placed.notes || []) reports.push(`${where} subject: ${n}`);
-            pg.fitNote = placed.note;
+            pg.fitNote = placed.note + (textAreas.some((a) => a.trimmed) ? " [text area = its lines]" : "");
             pg.placement = placed;
             writePlacementLabel(imageFrame, placed);
             if (TEXT_DIAGNOSTICS) {
@@ -2653,7 +2686,7 @@ async function writeLog(logLines, logPath) {
 module.exports = {
     checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
     isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
-    addDefaultSubjectFrames, templateState, saveTemplate,
+    addDefaultSubjectFrames, templateState, saveTemplate, textAvoidBounds,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
     pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, fitHeadlineToFrame,
 };

@@ -60,8 +60,22 @@ const PLACEMENT_CONFIG = {
     // size. The subject stays inside the free band (clear of the text); the
     // photo covers the frame where it can, any remaining gap is Image
     // Extension's. minFill 0 switches the zoom off.
+    // Whole-frame size (v1.2.5): the subject must also span at least
+    // minFrameFill of the WHOLE image frame (its larger share of the frame's
+    // width / height); if staying clear of the text would keep it smaller,
+    // it is enlarged to targetFrameFill and may overlap the text area — as
+    // little as possible: it still covers the free band, centred on it, and
+    // stays edgeMargin inside the frame. Never enlarged past maxFrameFill.
+    // minFrameFill 0 switches this off (subject always clear of the text).
+    // render.js passes the area the text actually uses (lines, not the whole
+    // text frame) as avoidBounds — see textBoundsFromLines().
     subject: { centerInExtendLayouts: true, maxInformativeSpan: 0.95, minFreeShare: 0.25,
-        minFill: 0.75, targetFill: 0.78, maxZoom: 3 },
+        minFill: 0.75, targetFill: 0.78, maxZoom: 4,
+        minFrameFill: 0.70, targetFrameFill: 0.75, maxFrameFill: 0.80, edgeMargin: 0.03,
+        printPpi: 150 },
+    // Text area (render.js): the lines' bounds plus textPadding × the
+    // average line height around them, clipped to the text frame.
+    text: { trimToLines: true, textPadding: 0.3 },
     // Red subject frame (subjectzone.js) + subject box: planZonePlacement().
     // The photo is scaled so the subject box fits the red frame (padding =
     // inner margin as a share of the frame's width / height) and the
@@ -196,6 +210,24 @@ function largestFreeInterval(lo, hi, blocked, minShare) {
     return best && best[1] - best[0] >= (hi - lo) * (minShare || 0) ? best : null;
 }
 
+// PURE. The area a text frame's text actually uses: the union of its lines
+// ({ top, left, bottom, right } each, page coordinates), padded by
+// pad × the average line height, clipped to the frame. null = no lines.
+function textBoundsFromLines(lines, frameBounds, pad) {
+    const f = toBox(frameBounds);
+    const ok = (lines || []).filter((l) => l && [l.top, l.left, l.bottom, l.right].every(Number.isFinite) && l.bottom > l.top && l.right >= l.left);
+    if (!ok.length) return null;
+    const lh = ok.reduce((a, l) => a + (l.bottom - l.top), 0) / ok.length;
+    const p = (pad != null ? pad : PLACEMENT_CONFIG.text.textPadding) * lh;
+    const t = Math.max(f.top, Math.min(...ok.map((l) => l.top)) - p);
+    const l = Math.max(f.left, Math.min(...ok.map((x) => x.left)) - p);
+    const b = Math.min(f.bottom, Math.max(...ok.map((x) => x.bottom)) + p);
+    const r = Math.min(f.right, Math.max(...ok.map((x) => x.right)) + p);
+    // Lines measured outside their own frame (rotated / vertical text): unusable.
+    if (!(b > t && r > l)) return null;
+    return [t, l, b, r];
+}
+
 //   avoidBounds: [[t, l, b, r], …] page items the subject should stay clear
 //                of (render.js: the text frames over the image) — optional
 function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = null, avoidBounds = null }) {
@@ -231,18 +263,34 @@ function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = n
         // contain-fit size; too small → enlarge (see PLACEMENT_CONFIG.subject).
         const fw = freeX[1] - freeX[0], fh = freeY[1] - freeY[0];
         const fill0 = Math.max((sb.width * w) / fw, (sb.height * h) / fh);
+        const frameFill0 = Math.max((sb.width * w) / f.width, (sb.height * h) / f.height);
         const informative = !(sb.width >= span && sb.height >= span);
         let zoom = 1;
-        if (cfg.minFill > 0 && informative && fill0 > 0 && fill0 < cfg.minFill) {
-            zoom = Math.min(cfg.targetFill / fill0, cfg.maxZoom || Infinity);
+        if (informative && fill0 > 0) {
+            let want = 1;
+            if (cfg.minFill > 0 && fill0 < cfg.minFill) want = cfg.targetFill / fill0;
+            if (cfg.minFrameFill > 0 && frameFill0 * want < cfg.minFrameFill) want = cfg.targetFrameFill / frameFill0;
+            if (cfg.maxFrameFill > 0) want = Math.min(want, Math.max(1, cfg.maxFrameFill / frameFill0));
+            zoom = Math.max(1, Math.min(want, cfg.maxZoom || Infinity));
         }
+        let overText = false;
         if (zoom > 1.0001) {
             iw = w * zoom; ih = h * zoom;
             // One axis: subject centred in the free band and kept inside it;
-            // the photo covers the frame where that's possible too.
+            // bigger than the band → it covers the band (the least overlap
+            // with the text) and stays edgeMargin inside the frame; the photo
+            // covers the frame where that's possible too.
             const axis = (fStart, fEnd, bStart, bEnd, size, b0, b1) => {
                 const centre = (bStart + bEnd) / 2 - ((b0 + b1) / 2) * size;
-                const keepLo = bStart - b0 * size, keepHi = bEnd - b1 * size;
+                let keepLo = bStart - b0 * size, keepHi = bEnd - b1 * size;
+                if (keepLo > keepHi + 0.01) {
+                    const m = (cfg.edgeMargin || 0) * (fEnd - fStart);
+                    const inLo = fStart + m - b0 * size, inHi = fEnd - m - b1 * size; // subject inside the frame
+                    const lo = Math.max(keepHi, inLo), hi = Math.min(keepLo, inHi);   // ... and covering the band
+                    if (lo <= hi + 0.01) { keepLo = lo; keepHi = Math.max(lo, hi); }
+                    else if (inLo <= inHi + 0.01) { keepLo = keepHi = clamp(centre, inLo, Math.max(inLo, inHi)); }
+                    else { keepLo = keepHi = (fStart + fEnd) / 2 - ((b0 + b1) / 2) * size; }
+                }
                 const coverLo = size >= fEnd - fStart ? fEnd - size : fStart;
                 const coverHi = size >= fEnd - fStart ? fStart : fEnd - size;
                 const lo = Math.max(keepLo, coverLo), hi = Math.min(keepHi, coverHi);
@@ -250,6 +298,8 @@ function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = n
             };
             left = axis(f.left, f.right, freeX[0], freeX[1], iw, sb.x, sb.x + sb.width);
             top = axis(f.top, f.bottom, freeY[0], freeY[1], ih, sb.y, sb.y + sb.height);
+            const s = { top: top + sb.y * ih, left: left + sb.x * iw, bottom: top + (sb.y + sb.height) * ih, right: left + (sb.x + sb.width) * iw };
+            overText = overl.some((o) => Math.min(o.right, s.right) - Math.max(o.left, s.left) > 0.5 && Math.min(o.bottom, s.bottom) - Math.max(o.top, s.top) > 0.5);
         } else {
             if (f.width - w > 0.01 && sb.width < span) left = clamp((freeX[0] + freeX[1]) / 2 - (sb.x + sb.width / 2) * w, f.left, f.right - w);
             if (f.height - h > 0.01 && sb.height < span) top = clamp((freeY[0] + freeY[1]) / 2 - (sb.y + sb.height / 2) * h, f.top, f.bottom - h);
@@ -257,6 +307,8 @@ function planImagePlacement({ frameBounds, sourceSize, policy, subjectBounds = n
         subjectShift = { dx: Math.round((left - before.left) * 100) / 100, dy: Math.round((top - before.top) * 100) / 100,
             zoom: Math.round(zoom * 100) / 100,
             fill: Math.round(Math.max((sb.width * iw) / fw, (sb.height * ih) / fh) * 100) / 100,
+            frameFill: Math.round(Math.max((sb.width * iw) / f.width, (sb.height * ih) / f.height) * 100) / 100,
+            overText,
             freeBand: { y: freeY.map((v) => Math.round(v * 10) / 10), x: freeX.map((v) => Math.round(v * 10) / 10) } };
     }
     return { mode: "extend", anchor: a, graphicBounds: [top, left, top + ih, left + iw], subjectBounds: sb, subjectShift };
@@ -424,19 +476,42 @@ function placeImageForExtension(frame, imagePath, id, policy, subjectBounds, avo
         avoidBounds: avoidBounds || null,
     });
     applyImagePlacement(graphic, placementPlan);
+    // Enlarged photo: say so when it prints below printPpi (no Review flag).
+    const notes = [];
+    let ppiNote = "";
+    const sh = placementPlan.subjectShift;
+    if (sh && sh.zoom > 1) {
+        notes.push(`enlarged x${sh.zoom} — the product fills ${Math.round(sh.frameFill * 100)}% of the image` +
+            (sh.overText ? " and overlaps the text area (check the text is readable)" : ", clear of the text"));
+    }
+    if (placementPlan.subjectShift && placementPlan.subjectShift.zoom > 1) {
+        try {
+            const ppi = Array.from(graphic.effectivePpi || [], Number).filter((v) => v > 0);
+            if (ppi.length) {
+                ppiNote = `effective ${Math.round(Math.min(...ppi))} ppi`;
+                if (Math.min(...ppi) < PLACEMENT_CONFIG.subject.printPpi) {
+                    notes.push(`photo enlarged x${placementPlan.subjectShift.zoom} to make the product bigger — effective resolution ${Math.round(Math.min(...ppi))} ppi, check print quality`);
+                }
+            }
+        } catch (e) {}
+    }
     return {
         note: `placement=extend (${fitNote}; policy ${policy.id}; anchor ${policy.anchor.vertical}/${policy.anchor.horizontal}` +
             (policy.gap ? `; ${policy.gap.axis} gap ${Math.round(policy.gap.ratio * 100)}%` : "") +
             (placementPlan.subjectShift ? `; subject-centred in free band y ${placementPlan.subjectShift.freeBand.y.join("–")}` +
                 ` dx ${placementPlan.subjectShift.dx} dy ${placementPlan.subjectShift.dy}` +
                 (placementPlan.subjectShift.zoom > 1 ? `; enlarged x${placementPlan.subjectShift.zoom}` : "") +
-                `; subject fills ${Math.round(placementPlan.subjectShift.fill * 100)}% of the free band` : "") + ")",
+                `; subject fills ${Math.round(placementPlan.subjectShift.frameFill * 100)}% of the frame` +
+                ` (${Math.round(placementPlan.subjectShift.fill * 100)}% of the free band)` +
+                (placementPlan.subjectShift.overText ? "; overlaps the text area to reach that size" : "") +
+                (ppiNote ? "; " + ppiNote : "") : "") + ")",
         placementPlan,
+        notes,
     };
 }
 
 module.exports = {
     PLACEMENT_CONFIG, validSubjectBox, largestFreeInterval, getLayoutPolicy, geometryFallbackPolicy, resolvePlacementPolicy, probeSourceSize,
-    planImagePlacement, applyImagePlacement, placeImageForExtension,
+    planImagePlacement, applyImagePlacement, placeImageForExtension, textBoundsFromLines,
     planZonePlacement, placeImageInZone, defaultSubjectZone,
 };
