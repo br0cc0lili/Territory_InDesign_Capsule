@@ -856,6 +856,16 @@ function wordSplitAcrossLines(lineTexts) {
     return false;
 }
 
+// PURE. The lines of `text` (a story's contents) from the story indices where
+// each line starts — independent of what a Line's own .contents returns (an
+// automatic hyphen is never part of the text, so "Snowboard" + "halter1"
+// shows up as a broken word).
+function linesFromStarts(text, starts) {
+    const s = String(text);
+    const sorted = starts.filter((n) => Number.isInteger(n) && n >= 0 && n <= s.length).sort((a, b) => a - b);
+    return sorted.map((start, i) => s.slice(start, i + 1 < sorted.length ? sorted[i + 1] : s.length));
+}
+
 const round1 = (n) => Math.round(n * 10) / 10;
 
 // Hyphenation off, auto-sizing off, then the largest font size that fits.
@@ -874,10 +884,18 @@ function fitHeadlineToFrame(frame) {
 function fitHeadlineToFrameUnsafe(frame, onRestore) {
     const { Leading, AutoSizingTypeEnum } = indesign();
     const story = frame.parentStory;
+    // Hyphenation off on every level the DOM offers (story, its text, each
+    // paragraph) — then read back, so the log shows what InDesign really has.
     try { story.hyphenation = false; } catch (e) {}
+    try { story.texts.item(0).hyphenation = false; } catch (e) {}
     for (let i = 0; i < story.paragraphs.length; i++) {
         try { story.paragraphs.item(i).hyphenation = false; } catch (e) {}
     }
+    let stillHyphenated = 0;
+    for (let i = 0; i < story.paragraphs.length; i++) {
+        try { if (story.paragraphs.item(i).hyphenation !== false) stillHyphenated++; } catch (e) { stillHyphenated++; }
+    }
+    const hyphenNote = stillHyphenated ? ` · ⚠ hyphenation still on in ${stillHyphenated} paragraph(s)` : " · hyphenation off";
     try {
         const prefs = frame.textFramePreferences;
         if (AutoSizingTypeEnum && prefs.autoSizingType !== AutoSizingTypeEnum.OFF) prefs.autoSizingType = AutoSizingTypeEnum.OFF;
@@ -912,28 +930,56 @@ function fitHeadlineToFrameUnsafe(frame, onRestore) {
         applied = scale;
     };
     onRestore(() => { applied = null; apply(1); });
+    // The frame's lines, cut from the story text at each line's start index
+    // (null = the lines couldn't be read — then breaks can't be checked).
+    const readLines = () => {
+        try {
+            const lines = frame.lines;
+            const starts = [];
+            for (let i = 0; i < lines.length; i++) {
+                const ln = itemAt(lines, i);
+                let at = NaN;
+                try { at = Number(ln.characters.item(0).index); } catch (e) {}
+                if (!Number.isInteger(at)) at = Number(ln.index);
+                starts.push(at);
+            }
+            if (!starts.length) return null;
+            return linesFromStarts(String(story.contents), starts);
+        } catch (e) {
+            return null;
+        }
+    };
+    let linesChecked = true;
     const fitsNow = () => {
         try { story.recompose(); } catch (e) {}
         if (oversets(frame)) return false;
-        const lines = [];
-        try { for (let i = 0; i < frame.lines.length; i++) lines.push(String(itemAt(frame.lines, i).contents)); } catch (e) {}
+        const lines = readLines();
+        if (!lines) { linesChecked = false; return true; }
         return !wordSplitAcrossLines(lines);
     };
     const fitsAt = (scale) => { apply(scale); return fitsNow(); };
 
     const best = largestFittingScale(fitsAt, maxSize);
     const from = round1(maxSize);
+    // Diagnostics for the log: hyphenation read-back + the final line breaks.
+    const tail = () => {
+        const lines = readLines();
+        const split = lines ? wordSplitAcrossLines(lines) : false;
+        return hyphenNote + (lines
+            ? ` · lines ${JSON.stringify(lines.map((l) => l.replace(/\s+$/, "")))}` + (split ? " · ⚠ a word is broken across lines" : "")
+            : " · ⚠ line breaks couldn't be read — not checked") + (linesChecked ? "" : " (during fitting too)");
+    };
     if (best === null) {
         apply(1); // doesn't fit even at the minimum: keep the template size, Review flags it
         try { story.recompose(); } catch (e) {}
         return { scale: 1, fits: false, from, to: from,
-            note: `text doesn't fit its frame even at ${round1(maxSize * TEXT_FIT.minScale)} pt — template size kept` };
+            note: `text doesn't fit its frame even at ${round1(maxSize * TEXT_FIT.minScale)} pt — template size kept` + tail() };
     }
     apply(best);
     try { story.recompose(); } catch (e) {}
-    if (best === 1) return { scale: 1, fits: true, from, to: from, note: `fits at the template size (${from} pt)` };
+    if (best === 1) return { scale: 1, fits: true, from, to: from, note: `fits at the template size (${from} pt)` + tail() };
     return { scale: best, fits: true, from, to: round1(maxSize * best),
-        note: `reduced ${from} → ${round1(maxSize * best)} pt (${Math.round(best * 100)} %) to fit the frame` };
+        note: `reduced ${from} → ${round1(maxSize * best)} pt (${Math.round(best * 100)} %) to fit the frame` + tail() };
 }
 
 // ---------- footer ----------
@@ -2688,5 +2734,5 @@ module.exports = {
     isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
     addDefaultSubjectFrames, templateState, saveTemplate, textAvoidBounds,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
-    pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, fitHeadlineToFrame,
+    pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, linesFromStarts, fitHeadlineToFrame,
 };

@@ -28,6 +28,12 @@ ok(calls <= 16, `binary search, not a fixed-step loop (${calls} checks)`);
 ok(!render.wordSplitAcrossLines(["Ski- und ", "Snowboardhalter\r", "Subline"]), "breaks at space / paragraph end are whole-word breaks");
 ok(!render.wordSplitAcrossLines(["Allwetter-", "fußmatten"]), "a break after an existing hyphen is allowed");
 ok(render.wordSplitAcrossLines(["Allwetterfuß", "matten"]), "a word broken across lines is detected (incl. ß)");
+// Lines cut from the story text by start index: an automatic hyphen is not
+// part of the text, so "Snowboard-|halter1" is "Snowboard" + "halter1".
+const cut = render.linesFromStarts("Ski- und Snowboardhalter1\rAudi Original Zubehör", [0, 9, 18, 26]);
+ok(JSON.stringify(cut) === JSON.stringify(["Ski- und ", "Snowboard", "halter1\r", "Audi Original Zubehör"]), "lines cut from the story by start index");
+ok(render.wordSplitAcrossLines(cut), "auto-hyphenated Snowboard-|halter1 is caught");
+ok(!render.wordSplitAcrossLines(render.linesFromStarts("Ski- und Snowboardhalter1\rAudi Original Zubehör", [0, 9, 26])), "Ski- und | Snowboardhalter1 is a whole-word break");
 
 // Mock frame: paragraph 0 = headline, 1 = subline; the text oversets while
 // the headline is over `capacity` pt.
@@ -53,6 +59,7 @@ function mockFrame(runsSpec, capacity, opts) {
             item: (p) => ({
                 contents: p ? "Subline" : "Headline\r",
                 set hyphenation(v) { chars.filter((c) => c.para === p).forEach((c) => { c.hyphenation = v; }); },
+                get hyphenation() { return chars.filter((c) => c.para === p).every((c) => c.hyphenation === false) ? false : true; },
                 get textStyleRanges() { const r = runsOf(p); return { length: r.length, item: (i) => r[i] }; },
             }),
         },
@@ -63,14 +70,20 @@ function mockFrame(runsSpec, capacity, opts) {
             }),
         },
         recompose() {},
+        get contents() { return frameLines().join(""); },
     };
+    const frameLines = () => (opts && opts.splitAbove && max() > opts.splitAbove ? ["Allwetterfuß", "matten\r", "Subline"] : ["Headline\r", "Subline"]);
     const max = () => Math.max(...chars.filter((c) => c.para === 0).map((c) => c.pointSize));
     const frame = {
         geometricBounds: [10, 10, 110, 410],
         parentStory: story,
         textFramePreferences: { autoSizingType: (opts && opts.autoSize) || AutoSizingTypeEnum.OFF },
         get overflows() { return max() > capacity; },
-        get lines() { const l = opts && opts.splitAbove && max() > opts.splitAbove ? ["Allwetterfuß", "matten"] : ["Headline ", "Subline"]; return { length: l.length, item: (i) => ({ contents: l[i] }) }; },
+        get lines() {
+            const l = frameLines(); const starts = []; let at = 0;
+            for (const t of l) { starts.push(at); at += t.length; }
+            return { length: l.length, item: (i) => ({ contents: l[i], characters: { item: () => ({ index: starts[i] }) } }) };
+        },
     };
     return { frame, chars };
 }
@@ -90,7 +103,7 @@ ok(r.fits && head <= 36.25 && head >= 36.1, `shrunk to the largest fitting size:
 ok(sub === 24 && m.chars[12].leading === 28, `subline keeps its template size + leading (${sub} pt / ${m.chars[12].leading} pt)`);
 ok(m.chars[0].leading === Leading.AUTO, "auto leading stays auto");
 ok(m.frame.textFramePreferences.autoSizingType === AutoSizingTypeEnum.OFF && JSON.stringify(m.frame.geometricBounds) === JSON.stringify(bounds), "frame auto-sizing off, geometry unchanged");
-ok(/reduced 48 → /.test(r.note), "note: " + r.note);
+ok(/reduced 48 → /.test(r.note) && /hyphenation off/.test(r.note) && /lines \["Headline","Subline"\]/.test(r.note), "note: " + r.note);
 
 // two headline runs (e.g. a bold word): one factor for both, fixed leading scaled
 m = mockFrame([{ len: 4, size: 48, leading: 52 }, { len: 6, size: 40, leading: 44 }, { len: 8, size: 24, leading: 28, para: 1 }], 30);
