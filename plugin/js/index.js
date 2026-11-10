@@ -1043,9 +1043,41 @@ function detailLines(rec, state, s) {
     const image = s && s.image;
     if (image) lines.push(imageLine(image));
     if (s && s.subject && s.subject.mode === "frames" && s.subject.zones && !s.subject.inFrame) lines.push(subjectLine(s));
+    lines.push(...warningSummary(s));
+    return lines;
+}
+
+// Warnings grouped by what the designer has to do, one short line per group
+// with a count (page-level texts stay in ⋯ → View details):
+//   ✗ technical failure (red) · ⚠ design / readability review (yellow) ·
+//   ⚠ quality note (muted — not an error). Image coverage warnings are left
+//   out: the Image line already says it.
+const WARNING_GROUPS = [
+    { test: /MainImage frame is empty/i, cls: "detail-error", text: "✗ Image missing" },
+    { test: /low text contrast/i, cls: "detail-warning", text: "⚠ Text contrast needs review" },
+    { test: /doesn't fit its frame|broken across lines/i, cls: "detail-warning", text: "⚠ Text doesn't fit" },
+    { test: /red subject frame|subject is bigger|part of the subject|busy image|covers the whole photo/i, cls: "detail-warning", text: "⚠ Subject placement needs review" },
+    { test: /resolution|\bppi\b/i, cls: "detail-muted", text: "⚠ Low effective resolution" },
+];
+
+function warningSummary(s) {
+    const image = s && s.image;
     const warnings = ((s && s.warnings) || []).filter((w) => !(image && IMAGE_WARNING.test(w)) &&
         !(s.subject && s.subject.wholePhoto && /covers the whole photo/.test(w)));
-    if (warnings.length) lines.push(["detail-warning", `⚠ ${warnings.length} other warning${warnings.length === 1 ? "" : "s"} — see ⋯`]);
+    const counts = new Map();
+    let other = 0;
+    for (const w of warnings) {
+        const g = WARNING_GROUPS.find((x) => x.test.test(w));
+        if (g) counts.set(g, (counts.get(g) || 0) + 1); else other++;
+    }
+    const lines = [];
+    // Pages whose Firefly request failed (last Extend), while still not covered.
+    const failed = Number((s && s.extendFailed) || 0);
+    if (failed && image && ["extension_available", "extension_required", "needs_review", "failed"].indexOf(image.status) !== -1) {
+        lines.push(["detail-error", `✗ Image extension failed · ${failed}`]);
+    }
+    for (const g of WARNING_GROUPS) if (counts.has(g)) lines.push([g.cls, `${g.text} · ${counts.get(g)}`]);
+    if (other) lines.push(["detail-warning", `⚠ Needs review · ${other}`]);
     return lines;
 }
 
@@ -1067,7 +1099,7 @@ function productStatusLines(s) {
         else if (need) counts = `${need} page${need === 1 ? "" : "s"}` + (plans ? ` · ${plans} plan${plans === 1 ? "" : "s"}` : "");
         out.push([cls, counts ? `${text} · ${counts}` : text]);
     }
-    return out;
+    return out.concat(warningSummary(s));
 }
 
 // Page-level details for "View details" (collapsed): readable, without plan
@@ -1248,6 +1280,7 @@ function recordGeneration(result) {
             exportedAt: null,
             image: g.image || null,
             subject: g.subject || null,
+            extendFailed: 0,
         });
     }
     for (const f of result.failed) {
@@ -1476,13 +1509,16 @@ async function extendRow(rec, mode, prompt) {
 // nothing else needs review) and returns the message lines for it.
 function recordExtendResult(rec, previous, result, choice) {
     const p = products.get(rec);
+    const failedPages = result.generations.filter((x) => x.error);
     setStatus(p.inddPath, {
         status: result.warnings.length ? "review" : "ready",
         warnings: result.warnings, error: "", committedAt: null, exportedAt: null,
         image: mergeImageStatus(previous, result.image),
+        // for the row's "✗ Image extension failed · n" (real failures only —
+        // not test-limit skips or "no stored extension" for Use Existing)
+        extendFailed: failedPages.filter((x) => !/^skipped|no existing extension/i.test(String(x.error))).length,
     });
     const applied = result.pages.filter((x) => x.applied).length;
-    const failedPages = result.generations.filter((x) => x.error);
     const head = applied
         ? `✓ ${choice === "regenerate" ? "Re-extended" : "Extended"} ${rec.headline} — ${applied} page(s)` +
           (result.newGenerations ? ` · ${result.newGenerations} new Firefly generation(s)` : " · existing extension, no Firefly call") +
