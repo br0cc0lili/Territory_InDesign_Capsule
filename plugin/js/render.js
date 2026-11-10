@@ -1844,8 +1844,10 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                 if (tcSwatches && tcSwatches.length) {
                     const waitForExtension = pagesAwaitingExtension(image.records);
                     const tc = await autoTextColorForDocument(doc, result.plan, tcSwatches, { waitForExtension });
-                    for (const r of tc) run.line(headline, `${t.name} text colour`, "", "info", r.pending ? `${r.layout}: waits for Image Extension` : r.error ? `${r.layout}: kept template colour (${r.error})` : `${r.layout}: ${r.swatch} (contrast ${r.score}; ranking ${r.ranking.join(" · ")})`);
+                    for (const r of tc) run.line(headline, `${t.name} text colour`, "", "info", textColorLogLine(r));
                     textColor = summarizeTextColors(tc);
+                    // Below the readability threshold: applied, but Review.
+                    result.reports.push(...textColorWarnings(tc));
                 }
                 await saveWhenIdle(doc, inddPath);
                 const warnings = result.reports.filter((r) => /^WARNING /.test(r)).concat(image.warnings);
@@ -1986,6 +1988,11 @@ function pageWarnings(page, imageStates) {
     }
     const headlineFrame = findHeadlineFrame(page);
     if (headlineFrame && oversets(headlineFrame)) warnings.push("headline/subline doesn't fit its frame");
+    // Auto Text Color below the readability threshold (stored at Generate /
+    // Extend) stays a warning until the text is regenerated or recoloured.
+    if (headlineFrame) {
+        try { warnings.push(...lowContrastWarnings(JSON.parse(headlineFrame.extractLabel(TEXT_COLOR_LABEL) || "null"))); } catch (e) {}
+    }
     const footerFrame = findFooterFrame(page);
     if (footerFrame && oversets(footerFrame)) warnings.push("footer doesn't fit its frame");
     return warnings;
@@ -2338,7 +2345,7 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     }
 
     // 4. Re-validate the whole product (original + extension), then save.
-    const check = checkProductPages(doc, plan);
+    let check = checkProductPages(doc, plan);
     const appliedAny = pages.some((p) => p.applied);
     // Auto Text Color on the new final composition — the step after Image
     // Extension for the pages that waited at Generate. A page that is still
@@ -2348,6 +2355,8 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     if (appliedAny && tcSwatches && tcSwatches.length) {
         const waitForExtension = pagesAwaitingExtension(pages.filter((p) => !p.applied).map((p) => p.record));
         try { textColor = summarizeTextColors(await autoTextColorForDocument(doc, plan, tcSwatches, { waitForExtension })); } catch (e) {}
+        // The new colours (and any low-contrast warning) are part of the check.
+        if (textColor) check = checkProductPages(doc, plan);
     }
     if (appliedAny) await saveWhenIdle(doc);
 
@@ -2436,24 +2445,28 @@ function textColorModules() {
     return (_textColorMods = palette && color ? { palette, color } : null);
 }
 
-// The area of the frame's VISIBLE text lines ([t, l, b, r], page units) —
-// tighter than the frame, which is often much taller than its text.
-function textLineBounds(frame) {
+// The glyph boxes ([t, l, b, r], page units) of the frame's VISIBLE lines that
+// belong to story paragraph `paraIndex` — the area the reader actually sees
+// behind that text (not the frame, not the gaps between lines). [] = none.
+function roleLineBoxes(frame, paraIndex) {
+    const boxes = [];
     try {
+        const para = frame.parentStory.paragraphs.item(paraIndex);
+        const start = Number(para.characters.item(0).index);
+        const end = start + Number(para.characters.length) - 1;
         const lines = frame.lines;
-        let t = Infinity, l = Infinity, b = -Infinity, r = -Infinity;
         for (let i = 0; i < lines.length; i++) {
             const ln = itemAt(lines, i);
             if (!String(ln.contents || "").replace(/\s+/g, "")) continue; // \s covers \r, \n and the Unicode line/paragraph separators
+            const at = Number(ln.characters.item(0).index);
+            if (!(at >= start && at <= end)) continue;
             const base = Number(ln.baseline), asc = Number(ln.ascent), desc = Number(ln.descent);
             const x0 = Number(ln.horizontalOffset), x1 = Number(ln.endHorizontalOffset);
             if (![base, asc, desc, x0, x1].every(isFinite)) continue;
-            t = Math.min(t, base - asc); b = Math.max(b, base + desc);
-            l = Math.min(l, x0); r = Math.max(r, x1);
+            if (base + desc > base - asc && Math.abs(x1 - x0) > 0) boxes.push([base - asc, Math.min(x0, x1), base + desc, Math.max(x0, x1)]);
         }
-        if (isFinite(t) && b > t && r > l) return [t, l, b, r];
     } catch (e) {}
-    return Array.from(frame.geometricBounds, Number);
+    return boxes;
 }
 
 // Renders ONE page with `hide` items hidden to a temporary low-resolution
@@ -2509,18 +2522,40 @@ function documentColorFor(doc, swatch) {
     return doc.colors.add({ name, model: ColorModel.PROCESS, space, colorValue: spec.values });
 }
 
-// Applies one swatch to the whole Headline/Subline story and records the
-// choice on the frame (script label, for traceability only).
-function applyTextColor(doc, frame, swatch, record) {
-    frame.parentStory.fillColor = documentColorFor(doc, swatch);
-    try { frame.insertLabel(TEXT_COLOR_LABEL, JSON.stringify(Object.assign({ swatch: swatch.id, name: swatch.name }, record))); } catch (e) {}
+// Applies one swatch to ONE paragraph (headline or subline) of the story.
+function applyTextColor(doc, frame, paraIndex, swatch) {
+    frame.parentStory.paragraphs.item(paraIndex).fillColor = documentColorFor(doc, swatch);
 }
 
-// Auto Text Color for every planned page of an open document.
+// The choice per role is recorded on the frame (script label): traceability,
+// and pageWarnings() keeps flagging low contrast at Preview / Commit.
+//   { v: 2, headline: { swatch, name, score, threshold, readable }, subline: … }
+function writeTextColorLabel(frame, roles) {
+    const label = { v: 2 };
+    for (const r of roles) {
+        if (r.swatch) label[r.role] = { swatch: r.swatchId, name: r.swatch, score: r.score, threshold: r.threshold, readable: r.readable };
+    }
+    try { frame.insertLabel(TEXT_COLOR_LABEL, JSON.stringify(label)); } catch (e) {}
+}
+
+// PURE. "low text contrast" warnings from a stored label (v2), [] otherwise.
+function lowContrastWarnings(label) {
+    if (!label || label.v !== 2) return [];
+    return ["headline", "subline"].filter((k) => label[k] && label[k].readable === false)
+        .map((k) => `low text contrast — ${k} ${label[k].name} reaches ${label[k].score}:1 in its weakest part (needs ${label[k].threshold}:1); best of the selected colours`);
+}
+
+// Auto Text Color for every planned page of an open document. Headline (1st
+// non-empty paragraph) and subline (2nd) are decided SEPARATELY, each on its
+// own visible glyph lines (roleLineBoxes), weakest-zone scoring
+// (textcolor.js chooseTextColorByZones). The best selected colour is always
+// applied; below the readability threshold it is ALSO reported (readable:
+// false → a Review warning).
 //   swatches: the designer's selected palette swatches (colorpalette.js)
 //   options.waitForExtension: page indices (0-based) whose image still needs
 //     Image Extension — skipped here; they get their colour after Extend
-// Returns [{ layout, swatch, score, error, pending }] — never throws.
+// Returns [{ layout, roles: [{ role, swatch, score, overall, threshold,
+//   readable, weakest, ranking, error }], error, pending }] — never throws.
 async function autoTextColorForDocument(doc, plan, swatches, options) {
     const waiting = (options && options.waitForExtension) || new Set();
     const results = [];
@@ -2533,20 +2568,56 @@ async function autoTextColorForDocument(doc, plan, swatches, options) {
         if (!frame) continue;
         if (waiting.has(pg.index)) { results.push({ layout, pending: true }); continue; }
         try {
-            const area = textLineBounds(frame);
+            const story = frame.parentStory;
+            const idx = nonEmptyParagraphs(story);
+            const roleDefs = [["headline", idx[0]], ["subline", idx[1]]].filter(([, i]) => i !== undefined);
+            if (!roleDefs.length) { results.push({ layout, error: "no text" }); continue; }
             const { image, pageBounds } = await renderPageBehindText(doc, page, [frame]);
             const sx = image.width / (pageBounds[3] - pageBounds[1]), sy = image.height / (pageBounds[2] - pageBounds[0]);
-            const box = { x: (area[1] - pageBounds[1]) * sx, y: (area[0] - pageBounds[0]) * sy, width: (area[3] - area[1]) * sx, height: (area[2] - area[0]) * sy };
-            const best = mods.color.chooseTextColor(mods.color.sampleLuminances(image, box), swatches);
-            if (!best) { results.push({ layout, error: "no pixels behind the text" }); continue; }
-            applyTextColor(doc, frame, best.swatch, { score: best.score });
-            results.push({ layout, swatch: best.swatch.name, score: best.score,
-                ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
+            const toPx = (b) => ({ x: (b[1] - pageBounds[1]) * sx, y: (b[0] - pageBounds[0]) * sy, width: (b[3] - b[1]) * sx, height: (b[2] - b[0]) * sy });
+            const roles = [];
+            for (const [role, pi] of roleDefs) {
+                try {
+                    const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
+                    let size = 0;
+                    try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
+                    const best = mods.color.chooseTextColorByZones(zones, swatches, mods.color.readabilityThreshold(size));
+                    if (!best) { roles.push({ role, error: "no visible text lines" }); continue; }
+                    applyTextColor(doc, frame, pi, best.swatch);
+                    roles.push({ role, swatch: best.swatch.name, swatchId: best.swatch.id, score: best.score, overall: best.overall,
+                        threshold: best.threshold, readable: best.readable, weakest: best.weakest, zones: zones.length,
+                        ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
+                } catch (e) {
+                    roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
+                }
+            }
+            writeTextColorLabel(frame, roles);
+            results.push({ layout, roles });
         } catch (e) {
             results.push({ layout, error: String((e && e.message) || e) }); // template colour stays
         }
     }
     return results;
+}
+
+// One log line per page for autoTextColorForDocument() results.
+function textColorLogLine(r) {
+    if (r.pending) return `${r.layout}: waits for Image Extension`;
+    if (r.error) return `${r.layout}: kept template colour (${r.error})`;
+    return `${r.layout}: ` + r.roles.map((x) => x.error ? `${x.role} kept template colour (${x.error})`
+        : `${x.role} ${x.swatch} (weakest-zone contrast ${x.score}; overall P10 ${x.overall}; needs ${x.threshold}` +
+            `${x.readable ? "" : " — LOW"}; ranking ${x.ranking.join(" · ")})`).join(" | ");
+}
+
+// "WARNING <layout>: low text contrast …" for every role below its threshold.
+function textColorWarnings(results) {
+    const out = [];
+    for (const r of results || []) {
+        for (const x of r.roles || []) {
+            if (x.swatch && !x.readable) out.push(`WARNING ${r.layout}: ${lowContrastWarnings({ v: 2, [x.role]: { name: x.swatch, score: x.score, threshold: x.threshold, readable: false } })[0]}`);
+        }
+    }
+    return out;
 }
 
 // PURE. Page indices (0-based) whose image doesn't cover its frame yet —
@@ -2557,12 +2628,15 @@ function pagesAwaitingExtension(records) {
     return new Set((records || []).filter((r) => r && (r.needsExtension || r.status === "extension_required")).map((r) => r.page - 1));
 }
 
-// Short summary for logs / the panel: { names: [colours used], pages }.
+// Short summary for logs / the panel: { names: [colours used], pages,
+// lowContrast: roles below their threshold, waitingForExtension }.
 function summarizeTextColors(results) {
-    const ok = (results || []).filter((r) => r.swatch);
+    const coloured = (results || []).filter((r) => (r.roles || []).some((x) => x.swatch));
     const pending = (results || []).filter((r) => r.pending).length;
-    if (!ok.length && !pending) return null;
-    return { names: [...new Set(ok.map((r) => r.swatch))], pages: ok.length, waitingForExtension: pending };
+    if (!coloured.length && !pending) return null;
+    const roles = coloured.flatMap((r) => r.roles.filter((x) => x.swatch));
+    return { names: [...new Set(roles.map((x) => x.swatch))], pages: coloured.length,
+        lowContrast: roles.filter((x) => !x.readable).length, waitingForExtension: pending };
 }
 
 // "danis" / "service" for a prepared template path (same rule as Render).
@@ -2735,4 +2809,5 @@ module.exports = {
     addDefaultSubjectFrames, templateState, saveTemplate, textAvoidBounds,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
     pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, linesFromStarts, fitHeadlineToFrame,
+    lowContrastWarnings, textColorWarnings, summarizeTextColors, textColorLogLine,
 };

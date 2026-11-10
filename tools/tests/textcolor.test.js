@@ -56,4 +56,46 @@ const waiting = render.pagesAwaitingExtension([
     { page: 4, status: "needs_review", needsExtension: false },
 ]);
 ok(waiting.has(1) && waiting.has(2) && !waiting.has(0) && !waiting.has(3), "covered page coloured now; uncovered pages (also over the limit) wait for Extend");
+
+// ---------- weakest-zone scoring (per role) ----------
+// A text line 400 × 40 px: bright metal, with a dark cable under the last
+// 8 % of the line — below the 10 % the old single-box P10 ignores.
+const line = (w, h, darkFrom) => ({ width: w, height: h, data: Uint8Array.from({ length: w * h * 4 }, (_, i) => {
+    if (i % 4 === 3) return 255; const x = Math.floor(i / 4) % w; return x >= darkFrom ? 12 : 238; }) });
+const marder = line(400, 40, 368);
+const lineBox = [{ x: 0, y: 0, width: 400, height: 40 }];
+const zones = tc.sampleZones(marder, lineBox);
+ok(zones.length === 5, `line split into ${zones.length} zones (400 px / (2 × 40 px))`);
+const red = sw.find((s) => s.name === "Red");
+const cand3 = [sw[0], sw[1], red];
+const old = tc.chooseTextColor(tc.sampleLuminances(marder, lineBox[0]), cand3);
+const neu = tc.chooseTextColorByZones(zones, cand3, tc.readabilityThreshold(87));
+ok(old.swatch.name === "Black", `old whole-box P10 picks Black (${old.score}) — unreadable over the cable`);
+const blackRank = neu.ranking.find((x) => x.swatch.name === "Black");
+ok(neu.swatch.name === "Red" && blackRank.weakest.zone === 4 && blackRank.score < 1.5,
+    `weakest-zone scoring picks ${neu.swatch.name} (weakest ${neu.score}); Black drops to ${blackRank.score} — its weakest zone is the cable (zone ${blackRank.weakest.zone})`);
+ok(neu.score <= neu.overall, "score = min(overall P10, weakest zone P10)");
+// Headline and subline decided independently
+const darkLine = tc.sampleZones(line(300, 30, 0), [{ x: 0, y: 0, width: 300, height: 30 }]);
+const brightLine = tc.sampleZones(line(300, 30, 9999), [{ x: 0, y: 0, width: 300, height: 30 }]);
+ok(tc.chooseTextColorByZones(darkLine, cand, 3).swatch.name === "White" && tc.chooseTextColorByZones(brightLine, cand, 3).swatch.name === "Black",
+    "headline over a dark area → White, subline over a bright area → Black (separate decisions)");
+// Threshold: large text 3:1, normal 4.5:1; below it → best still returned, readable false
+ok(tc.readabilityThreshold(87) === 3 && tc.readabilityThreshold(18) === 3 && tc.readabilityThreshold(14) === 4.5, "WCAG threshold: ≥ 18 pt → 3:1, smaller → 4.5:1");
+const brightOnly = tc.sampleZones(bg([238, 238, 238], 200, 20), [{ x: 0, y: 0, width: 200, height: 20 }]);
+const g = tc.chooseTextColorByZones(brightOnly, [sw[0], red], 4.5); // only White + Red selected, small text
+ok(g && g.swatch.name === "Red" && g.readable === false && g.score < 4.5, `bright background, only White/Red selected: best ${g.swatch.name} (${g.score}) still returned, readable = false`);
+ok(tc.chooseTextColorByZones([], cand, 3) === null && tc.chooseTextColorByZones(brightOnly, [], 3) === null, "no lines / no candidates → null (template colour kept)");
+// render.js: warnings, label, summary
+const lowLabel = { v: 2, headline: { name: "White RGB", score: 2.1, threshold: 3, readable: false }, subline: { name: "White RGB", score: 6, threshold: 3, readable: true } };
+const lw = render.lowContrastWarnings(lowLabel);
+ok(lw.length === 1 && /headline White RGB reaches 2.1:1.*needs 3:1/.test(lw[0]), "stored label → one low-contrast warning (headline only): " + lw[0]);
+ok(render.lowContrastWarnings({ swatch: "x", score: 2 }).length === 0 && render.lowContrastWarnings(null).length === 0, "old / missing label → no warning");
+const results = [{ layout: "service_up 1200x1200", roles: [{ role: "headline", swatch: "White RGB", score: 2.1, overall: 4, threshold: 3, readable: false, ranking: ["White RGB 2.1"] },
+    { role: "subline", swatch: "Audi Black RGB", score: 5, overall: 6, threshold: 3, readable: true, ranking: ["Audi Black RGB 5"] }] }, { layout: "x", pending: true }];
+const tw = render.textColorWarnings(results);
+ok(tw.length === 1 && /^WARNING service_up 1200x1200: low text contrast — headline/.test(tw[0]), "low contrast → a WARNING line (product goes to Review)");
+const sum = render.summarizeTextColors(results);
+ok(sum.lowContrast === 1 && sum.names.length === 2 && sum.pages === 1 && sum.waitingForExtension === 1, "summary counts colours, low-contrast roles, waiting pages");
+ok(/headline White RGB .*LOW.*\| subline Audi Black RGB/.test(render.textColorLogLine(results[0])), "log line names both roles, LOW marked");
 console.log(f ? f + " FAILED" : "all passed");
