@@ -335,6 +335,21 @@ function subjectModule() {
     return null;
 }
 
+// Capsule JSON (capsule.js) — the alternative subject source: imported
+// Adobe Capsule detections instead of the backend API. Loaded the same way;
+// if it can't load, Capsule mode has no data (it never falls back to the API).
+let _capsule = null;
+function capsuleModule() {
+    if (_capsule) return _capsule;
+    for (const path of ["./capsule.js", "./js/capsule.js"]) {
+        try {
+            const mod = require(path);
+            if (mod && typeof mod.createCapsuleDetector === "function") return (_capsule = mod);
+        } catch (e) {}
+    }
+    return null;
+}
+
 // Red subject frame (subjectzone.js) — loaded the same way; if it can't
 // load, pages simply have no zone.
 let _zone = null;
@@ -1410,9 +1425,15 @@ function populateDocument(doc, t, rec, subject, options) {
 
     // Fill every page. Each page resolves its OWN frames — nothing is cached
     // or reused across pages.
+    const productSubject = subject;
     for (const pg of plan.pages) {
         const page = doc.pages.item(pg.index);
         const where = `${pg.layout.key} ${pg.layout.size} (page ${pg.index + 1})`;
+        // Capsule (capsule.js): a box edited for ONE layout replaces the
+        // photo's box on that page only. Any other subject result has no
+        // forLayout and is used unchanged, as before.
+        subject = productSubject && typeof productSubject.forLayout === "function" ? productSubject.forLayout(pg.layout) : productSubject;
+        if (subject !== productSubject) reports.push(`${where} subject: Capsule box adjusted for this layout only`);
         try {
             const textDiag = setHeadlineText(doc, findHeadlineFrame(page), rec.headline, subline);
             // No hyphenation; template size, or the largest size that fits.
@@ -1690,6 +1711,133 @@ function inddPathFor(rec, templatePath, outputRootPath) {
     return { subType, inddPath };
 }
 
+// ---------- Capsule subject source: status + Preview Placement ----------
+//
+// Capsule (capsule.js) only changes WHERE the subject box comes from; the
+// placement below is the existing one. These helpers report Capsule status
+// and let the editor preview the existing placement for an edited box.
+
+// The Review warning for a photo without (valid) Capsule data, or "".
+function capsuleMissingWarning(subject) {
+    if (!subject || !subject.capsule || subject.box) return "";
+    const why = subject.capsule.status === "stale"
+        ? "the photo changed after its Capsule JSON was imported — re-import it, or keep the data for the changed photo"
+        : "no Capsule JSON imported for this photo";
+    return `WARNING Missing Detection Data: ${why} — the original default placement was used`;
+}
+
+// Capsule part of the product status (panel), or null.
+function capsuleStatusRecord(subject) {
+    const c = subject && subject.capsule;
+    if (!c) return null;
+    const edges = c.edges ? ["left", "top", "right", "bottom"].filter((k) => c.edges[k]) : [];
+    return { status: c.status, boxSource: c.boxSource || "", focalSource: c.focalSource || "", file: c.file || "",
+        importedAt: c.importedAt || "", edges, layoutEdits: c.layoutEdits || [], focalPoint: subject.focalPoint || null };
+}
+
+// PURE. The placement populateDocument + placeProductImage would make on one
+// page for a subject result — computed with the SAME placement.js functions
+// and the same decisions (red frame → extend → fill), without InDesign.
+//   page: { layout, frameBounds, pageBounds, avoid, zone } (readPlacementGeometry)
+//   subject: subject result (capsule.js) or null
+//   pixelSize: { width, height } of the photo. placeImageInZone measures the
+//     photo placed at 100% (pixels × 72 / ppi) and caps the scale at
+//     ppi / 72 — the same as pixel size with a cap of 1.
+//   framesMode: Custom Subject Frames
+// Returns { kind: "zone"|"extend"|"fill", policyId, graphicBounds, subjectRect,
+//           focal, stats, warnings, notes } (+ the page geometry).
+function previewPlacementForPage(page, subject, pixelSize, framesMode) {
+    const pl = placementModule();
+    const s = subject && typeof subject.forLayout === "function" ? subject.forLayout(page.layout) : subject;
+    const sourceSize = { width: pixelSize.width, height: pixelSize.height };
+    const out = { layout: page.layout, frameBounds: page.frameBounds, pageBounds: page.pageBounds, avoid: page.avoid || [],
+        zone: page.zone || null, kind: "fill", policyId: "", graphicBounds: null, subjectRect: null, focal: null,
+        stats: {}, warnings: [], notes: [], boxSource: s && s.capsule ? s.capsule.boxSource : "" };
+    const zone = framesMode ? page.zone : null;
+    const usableBox = s && s.box && (s.source === "chosen" || !s.wholePhoto) ? s.box : null;
+    const box = usableBox || (s && s.box) || null;
+    if (framesMode && !page.zone) out.notes.push("no red subject frame on this layout — Auto Placement used");
+    if (zone && s && s.box && !usableBox) out.warnings.push("the subject box covers the whole photo, so the red subject frame is not used");
+    if (!(s && s.box)) out.warnings.push("no subject box — the original default placement is used");
+    let policy = pl.getLayoutPolicy(page.layout);
+    if (!policy.known) policy = pl.resolvePlacementPolicy(page.layout, page.frameBounds, sourceSize);
+    out.policyId = policy.id;
+    const finish = (graphicBounds) => {
+        out.graphicBounds = graphicBounds;
+        if (graphicBounds && box) {
+            const [t, l, b, r] = graphicBounds, w = r - l, h = b - t;
+            out.subjectRect = [t + box.y * h, l + box.x * w, t + (box.y + box.height) * h, l + (box.x + box.width) * w];
+            if (s.focalPoint) out.focal = { y: t + s.focalPoint.y * h, x: l + s.focalPoint.x * w };
+        }
+        return out;
+    };
+    if (zone && usableBox) {
+        const plan = pl.planZonePlacement({ frameBounds: page.frameBounds, zoneBounds: zone.bounds, sourceSize, subjectBounds: box, policy, maxScale: 1 });
+        if (plan) {
+            out.kind = "zone";
+            out.stats = { scale: plan.scale, gaps: plan.gaps };
+            out.warnings.push(...plan.warnings);
+            out.notes.push(...plan.notes);
+            return finish(plan.graphicBounds);
+        }
+        out.warnings.push("the red subject frame lies outside the image frame — normal placement used");
+    }
+    if (policy.placementMode === "extend") {
+        const plan = pl.planImagePlacement({ frameBounds: page.frameBounds, sourceSize, policy, subjectBounds: box, avoidBounds: page.avoid || null });
+        out.kind = "extend";
+        const sh = plan.subjectShift;
+        if (sh) out.stats = { frameFill: sh.frameFill, fill: sh.fill, zoom: sh.zoom, overText: sh.overText };
+        if (sh && sh.overText) out.notes.push("the product overlaps the text area to reach its size (existing rule)");
+        return finish(plan.graphicBounds);
+    }
+    out.notes.push("Fill layout: InDesign's Content-Aware Fit decides the crop (original behaviour) — no preview of the crop");
+    return out;
+}
+
+// Page geometry for Preview Placement, read from fresh COPIES (nothing is
+// changed or saved): the product INDD when it exists (real merged text),
+// else the Template Set (its placeholder text — approximate). Red subject
+// frames always come from the Template Set (product INDDs have them removed).
+// Returns { source: "product"|"template", pages: [{ layout, layoutId, frameBounds, pageBounds, avoid, zone }] }.
+async function readPlacementGeometry(productInddPath, templatePath) {
+    const subType = subTypeFromPath(templatePath);
+    const lid = (l) => [l.subType, l.size, l.position].map((v) => String(v || "").toLowerCase()).join("/");
+    const readDoc = async (path) => {
+        let doc = null;
+        try {
+            doc = await openTemplateCopy(path);
+            usePoints(doc);
+            const plan = planPages(doc, subType);
+            const pages = [];
+            for (const pg of plan.pages) {
+                const page = doc.pages.item(pg.index);
+                const frame = findImageFrame(page);
+                if (!frame) continue;
+                const avoid = [findHeadlineFrame(page), findFooterFrame(page)].filter(Boolean).map(textAvoidBounds).map((a) => a.bounds).filter(Boolean);
+                pages.push({ layout: pg.layout, layoutId: lid(pg.layout), page: pg.index + 1,
+                    frameBounds: Array.from(frame.geometricBounds, Number), pageBounds: Array.from(page.bounds, Number), avoid,
+                    zone: pg.descriptor && pg.descriptor.zone ? { bounds: pg.descriptor.zone.bounds.slice() } : null });
+            }
+            return pages;
+        } finally {
+            closeWithoutSaving(doc);
+            await settle(250);
+        }
+    };
+    const templatePages = await readDoc(templatePath);
+    if (productInddPath && await pathExists(productInddPath)) {
+        try {
+            const productPages = await readDoc(productInddPath);
+            for (const p of productPages) {
+                const t = templatePages.find((x) => x.layoutId === p.layoutId);
+                p.zone = t ? t.zone : null;
+            }
+            if (productPages.length) return { source: "product", pages: productPages };
+        } catch (e) {}
+    }
+    return { source: "template", pages: templatePages };
+}
+
 // ---------- generate the product INDDs (Generate All / Regenerate) ----------
 
 // manifestRows: rows from matcher.js's buildManifest() — the whole batch
@@ -1720,6 +1868,9 @@ function inddPathFor(rec, templatePath, outputRootPath) {
 //   designer just moved a red frame) is saved first, because Generate reads
 //   the template from disk.
 //   options.textColor: { swatches } — Auto Text Color with the selected palette swatches (optional)
+//   options.subjectSource: "capsule" — subject boxes from the imported Capsule
+//   JSON (capsule.js) instead of the backend API; the API is not called.
+//   Placement itself is unchanged.
 async function generateIndds(manifestRows, templatePaths, outputRootPath, onProgress, options) {
     if (!templatePaths || !templatePaths.length) {
         throw new Error("No templates — prepare the client template in step 2 first.");
@@ -1766,7 +1917,22 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
     // Subject detection (bounding box → placement.js), once per photo. Off or
     // failing → no box → placement exactly as without it; never blocks Generate.
     let subjectDetector = null;
-    try {
+    // Capsule mode: subjects come ONLY from the imported Capsule JSON
+    // (<output>/capsule_subjects.json). The backend API is never called —
+    // a photo without data gets no box (Missing Detection Data, below).
+    const capsuleSource = !!(options && options.subjectSource === "capsule");
+    if (capsuleSource) {
+        const cm = capsuleModule();
+        let store = { items: {} };
+        if (cm) {
+            try { store = await cm.loadCapsuleStore(root); } catch (e) {}
+            if (store.error) run.line("", "subject detection", store.path || "", "warning", store.error + " — every photo counts as Missing Detection Data");
+        }
+        subjectDetector = cm ? cm.createCapsuleDetector(store) : { enabled: true, hasChoices: false,
+            detect: async () => ({ box: null, source: "capsule", reason: "capsule.js failed to load", capsule: { status: "missing" } }) };
+        run.line("", "subject detection", "", "info", "Capsule JSON (capsule_subjects.json) — backend API not used");
+    }
+    if (!capsuleSource) try {
         const mod = subjectModule();
         if (mod) {
             const sc = await mod.loadSubjectConfig();
@@ -1788,7 +1954,9 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
             run.line(headline, "subject", rec.imagePath, "info", subject.box
                 ? `subject box x ${subject.box.x} y ${subject.box.y} w ${subject.box.width} h ${subject.box.height} (${subject.source}` +
                     (subject.labels && subject.labels.length ? `: ${subject.labels.join(" + ")}` : "") +
-                    (subject.seconds != null ? `, ${subject.seconds}s` : "") + (subject.wholePhoto ? ", whole photo" : "") + ")"
+                    (subject.seconds != null ? `, ${subject.seconds}s` : "") + (subject.wholePhoto ? ", whole photo" : "") + ")" +
+                    (subject.focalPoint ? ` focal point x ${subject.focalPoint.x} y ${subject.focalPoint.y} (metadata — not used by placement)` : "") +
+                    (subject.capsule && subject.capsule.layoutEdits && subject.capsule.layoutEdits.length ? `; layout edits: ${subject.capsule.layoutEdits.join(" ")}` : "")
                 : `no subject box — placement without it (${subject.reason})`);
         }
         for (const t of templates) {
@@ -1849,6 +2017,10 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                     // Below the readability threshold: applied, but Review.
                     result.reports.push(...textColorWarnings(tc));
                 }
+                // Capsule mode without (valid) data for this photo: placed the
+                // original default way, but the product goes to Review.
+                const missingDetection = capsuleMissingWarning(subject);
+                if (missingDetection) result.reports.push(missingDetection);
                 await saveWhenIdle(doc, inddPath);
                 const warnings = result.reports.filter((r) => /^WARNING /.test(r)).concat(image.warnings);
                 run.success(headline, label, inddPath, "populated + validated" +
@@ -1861,6 +2033,7 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
                         source: (subject && subject.source) || "", chosen: !!(subject && subject.source === "chosen"), labels: (subject && subject.labels) || [],
                         wholePhoto: !!(subject && subject.box && subject.wholePhoto && subject.source !== "chosen"),
                         mode: placementMode,
+                        capsule: capsuleStatusRecord(subject),
                         inFrame: result.plan ? result.plan.pages.filter((pg) => pg.placement && pg.placement.zone).length : 0,
                         zones: placementMode === "frames" && result.plan ? result.plan.pages.filter((pg) => pg.descriptor && pg.descriptor.zone).length : 0 } : null });
             } catch (e) {
@@ -2810,4 +2983,5 @@ module.exports = {
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
     pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, linesFromStarts, fitHeadlineToFrame,
     lowContrastWarnings, textColorWarnings, summarizeTextColors, textColorLogLine,
+    capsuleMissingWarning, capsuleStatusRecord, previewPlacementForPage, readPlacementGeometry,
 };
