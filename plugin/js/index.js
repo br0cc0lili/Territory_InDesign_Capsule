@@ -30,6 +30,10 @@ try { datamerge = require("./js/datamerge.js"); } catch (e) { loadErrors.push("d
 // Choose Subject (bounding box): object detection + choices, and its window.
 try { subjectMod = require("./js/subject.js"); } catch (e) { loadErrors.push("subject.js: " + e); }
 try { pickerMod = require("./js/subjectpicker.js"); } catch (e) { loadErrors.push("subjectpicker.js: " + e); }
+// Capsule subject source: imported Adobe Capsule JSON + its editor window.
+let capsuleMod = null, capsuleEditor = null;
+try { capsuleMod = require("./js/capsule.js"); } catch (e) { loadErrors.push("capsule.js: " + e); }
+try { capsuleEditor = require("./js/capsuleeditor.js"); } catch (e) { loadErrors.push("capsuleeditor.js: " + e); }
 // Optional Auto Text Color palette reader — if it can't load, the palette row just stays empty.
 let colorpalette = null;
 try { colorpalette = require("./js/colorpalette.js"); } catch (e) { loadErrors.push("colorpalette.js: " + e); }
@@ -90,6 +94,12 @@ const el = {
     btnSaveFrames: document.getElementById("btn-save-frames"),
     framesUnsaved: document.getElementById("frames-unsaved"),
     framesSummary: document.getElementById("frames-summary"),
+    srcCapsule: document.getElementById("src-capsule"),
+    srcApi: document.getElementById("src-api"),
+    capsuleActions: document.getElementById("capsule-actions"),
+    btnCapsuleImport: document.getElementById("btn-capsule-import"),
+    capsuleSummary: document.getElementById("capsule-summary"),
+    capsuleMessage: document.getElementById("capsule-message"),
     activeActions: document.getElementById("active-actions"),
     activeStatus: document.getElementById("active-status"),
     dialog: document.getElementById("action-dialog"),
@@ -108,6 +118,7 @@ const STORE = {
     palette: "posterBatch.palette", // { path, selected: [swatch ids] } — Auto Text Color
     statuses: "posterBatch.inddStatuses",
     placementMode: "posterBatch.placementMode",
+    subjectSource: "posterBatch.subjectSource", // "capsule" (default) | "api"
 };
 
 function remember(key, value) {
@@ -222,6 +233,9 @@ async function restoreSelections() {
     for (const p of paths.slice(-1)) if (await entryFor(p)) templatePaths.push(p);
     showContext();
     showPlacementMode();
+    showSubjectSource();
+    await loadCapsule();
+    refreshCapsuleSummary();
     updateButtons();
 }
 
@@ -272,6 +286,7 @@ function updateButtons() {
     el.btnExtendAll.disabled = busy || !outputEntry || extendableRows().length === 0;
     el.btnExport.disabled = busy || !outputEntry || committedRows().length === 0;
     el.btnDmPrepare.disabled = busy || !excelEntry;
+    if (el.btnCapsuleImport) el.btnCapsuleImport.disabled = busy || !outputEntry;
 }
 
 function setBusy(on) {
@@ -595,6 +610,387 @@ function pollTemplateFrames() {
 
 setInterval(pollTemplateFrames, 1000);
 
+// ---------- step 3: subject detection source (Capsule JSON / Backend API) ----------
+//
+// Capsule JSON (default): the subject box comes from the JSON Adobe Capsule
+// downloads per photo (capsule.js, <output>/capsule_subjects.json). The
+// backend API is never called in this mode. Backend API: the original
+// automatic detection. Either way the SAME placement runs (Auto Placement or
+// Custom Subject Frames above).
+
+function subjectSource() {
+    return recall(STORE.subjectSource) === "api" ? "api" : "capsule";
+}
+
+function showSubjectSource() {
+    if (!el.srcCapsule) return;
+    const capsule = subjectSource() === "capsule";
+    setClass(el.srcCapsule, "source-selected", capsule);
+    setClass(el.srcApi, "source-selected", !capsule);
+    setClass(el.capsuleActions, "hidden", !capsule);
+}
+
+let capsuleStore = null; // capsule.js store of the output folder, or null
+
+async function loadCapsule() {
+    capsuleStore = null;
+    if (!capsuleMod || !outputEntry) return null;
+    try { capsuleStore = await capsuleMod.loadCapsuleStore(outputEntry.nativePath); } catch (e) { capsuleStore = null; }
+    return capsuleStore;
+}
+
+function capsuleEntryFor(rec) {
+    return capsuleStore && rec && rec.imagePath ? capsuleStore.items[capsuleMod.storeKey(rec.imagePath)] || null : null;
+}
+
+function matchedPhotos() {
+    return manifestRows.filter((r) => r.status === "matched" && r.imagePath).map((r) => r.imagePath);
+}
+
+// "A6 Avant/car_01.jpg" — enough to tell photos apart in a list.
+function photoLabel(path) {
+    return String(path || "").split("/").slice(-2).join("/");
+}
+
+function setCapsuleMessage(text) {
+    if (!el.capsuleMessage) return;
+    el.capsuleMessage.textContent = text || "";
+    setClass(el.capsuleMessage, "has-message", !!text);
+}
+
+// Capsule status of every matched photo: Map(storeKey → "auto"|"manual"|"missing"|"stale").
+async function capsuleStatuses(rows) {
+    const out = new Map();
+    for (const rec of rows || []) {
+        if (rec.status !== "matched" || !rec.imagePath) continue;
+        const key = capsuleMod.storeKey(rec.imagePath);
+        if (out.has(key)) continue;
+        const entry = capsuleEntryFor(rec);
+        const fp = entry ? await capsuleMod.photoFingerprint(rec.imagePath) : null;
+        out.set(key, capsuleMod.entryStatus(entry, fp));
+    }
+    return out;
+}
+
+async function refreshCapsuleSummary() {
+    if (!el.capsuleSummary) return;
+    if (subjectSource() !== "capsule") { el.capsuleSummary.textContent = ""; return; }
+    if (!capsuleMod) { el.capsuleSummary.textContent = "capsule.js failed to load — see the banner above."; return; }
+    if (!outputEntry) { el.capsuleSummary.textContent = "Select the output folder (step 1) first — Capsule data is saved there."; return; }
+    if (!capsuleStore) await loadCapsule();
+    if (capsuleStore && capsuleStore.error) { el.capsuleSummary.textContent = "⚠ " + capsuleStore.error; return; }
+    const stored = capsuleStore ? Object.keys(capsuleStore.items).length : 0;
+    if (!hasMatchedRows()) {
+        el.capsuleSummary.textContent = `Capsule data for ${stored} photo${stored === 1 ? "" : "s"} in this output folder — Match (step 4) to see which products still need it.`;
+        return;
+    }
+    const st = await capsuleStatuses(manifestRows);
+    const n = { auto: 0, manual: 0, missing: 0, stale: 0 };
+    for (const v of st.values()) n[v]++;
+    const ok = n.auto + n.manual;
+    const parts = [`Capsule data: ${ok} of ${st.size} photo${st.size === 1 ? "" : "s"}`];
+    if (n.manual) parts.push(`${n.manual} adjusted`);
+    if (n.missing) parts.push(`⚠ ${n.missing} Missing Detection Data`);
+    if (n.stale) parts.push(`⚠ ${n.stale} photo${n.stale === 1 ? "" : "s"} changed since import`);
+    el.capsuleSummary.textContent = parts.join(" · ");
+}
+
+function setSubjectSource(source) {
+    if (busy) return;
+    remember(STORE.subjectSource, source === "api" ? "api" : "capsule");
+    showSubjectSource();
+    refreshCapsuleSummary();
+}
+
+if (el.srcCapsule) {
+    el.srcCapsule.addEventListener("click", () => setSubjectSource("capsule"));
+    el.srcApi.addEventListener("click", () => setSubjectSource("api"));
+    el.btnCapsuleImport.addEventListener("click", () => importCapsuleFiles());
+}
+
+// Before Generate / Regenerate in Capsule mode: photos without valid
+// Capsule data are named, and only placed (with the original default
+// placement, marked Review / Missing Detection Data) when the designer says
+// so. Never falls back to the backend API. Returns true to go on.
+async function confirmCapsuleCoverage(rows) {
+    if (subjectSource() !== "capsule") return true;
+    if (!capsuleMod) {
+        const go = await showDialog("Missing Detection Data", "capsule.js failed to load, so no Capsule data can be used. " +
+            "Products would be placed with the original default placement and marked Review.",
+            [{ label: "Continue with Default Placement", value: "go", danger: true }]);
+        return go === "go";
+    }
+    await loadCapsule();
+    const st = await capsuleStatuses(rows);
+    const byStatus = (s) => (rows || []).filter((r) => r.status === "matched" && r.imagePath && st.get(capsuleMod.storeKey(r.imagePath)) === s);
+    const missing = byStatus("missing"), stale = byStatus("stale");
+    if (!missing.length && !stale.length) return true;
+    const list = (rs) => rs.slice(0, 8).map((r) => `• ${r.headline} — ${photoLabel(r.imagePath)}`).join("\n") + (rs.length > 8 ? `\n…and ${rs.length - 8} more` : "");
+    const lines = [];
+    if (capsuleStore && capsuleStore.error) lines.push("⚠ " + capsuleStore.error + "\n");
+    if (missing.length) lines.push(`${missing.length} product${missing.length === 1 ? " has" : "s have"} no Capsule JSON for the photo:\n${list(missing)}`);
+    if (stale.length) lines.push(`${stale.length} photo${stale.length === 1 ? "" : "s"} changed after the Capsule JSON was imported:\n${list(stale)}`);
+    lines.push("\nYou can continue with the original plugin's default placement (no subject box). These products are marked Review — Missing Detection Data. The backend API is not used.");
+    const answer = await showDialog("Missing Detection Data", lines.join("\n\n"), [
+        { label: "Import Capsule JSON Files…", value: "import" },
+        { label: "Continue with Default Placement", value: "go", danger: true },
+    ]);
+    if (answer === "import") { await importCapsuleFiles(); return false; }
+    return answer === "go";
+}
+
+async function pickJsonFiles(multiple) {
+    const picked = await fs.getFileForOpening({ allowMultiple: !!multiple, types: ["json"] });
+    if (!picked) return [];
+    return Array.isArray(picked) ? picked : (typeof picked.length === "number" && !picked.nativePath ? Array.from(picked) : [picked]);
+}
+
+// Step 3 → Import Capsule JSON Files…: several JSONs at once, each paired
+// with a matched photo by FILE NAME only (car_01.json → car_01.jpg). Nothing
+// ambiguous, unmatched or duplicated is imported; the pairing is confirmed first.
+async function importCapsuleFiles() {
+    if (!capsuleMod) { setCapsuleMessage("capsule.js failed to load — see the banner above."); return; }
+    if (!outputEntry) { setCapsuleMessage("Select the output folder (step 1) first — Capsule data is saved there."); return; }
+    const photos = matchedPhotos();
+    if (!photos.length) { setCapsuleMessage("Run Match (step 4) first, so the plugin knows which photo each product uses."); return; }
+    let files;
+    try { files = await pickJsonFiles(true); } catch (e) { setCapsuleMessage(errorText(e)); return; }
+    if (!files.length) return;
+    await loadCapsule();
+    if (capsuleStore && capsuleStore.error) { setCapsuleMessage("⚠ " + capsuleStore.error + " — nothing imported."); return; }
+    const m = capsuleMod.matchJsonFilesToPhotos(files.map((x) => x.nativePath), photos);
+    const name = (p) => String(p).split("/").pop();
+    const lines = [];
+    if (m.matched.length) lines.push(`${m.matched.length} file${m.matched.length === 1 ? "" : "s"} match a photo:\n` +
+        m.matched.slice(0, 10).map((x) => `• ${name(x.json)} → ${photoLabel(x.photo)}`).join("\n") + (m.matched.length > 10 ? `\n…and ${m.matched.length - 10} more` : ""));
+    const skipped = [];
+    for (const j of m.unmatched) skipped.push(`• ${name(j)} — no matched photo with that name`);
+    for (const a of m.ambiguous) skipped.push(`• ${name(a.json)} — ${a.photos.length} photos have that name (use ⋯ → Import Capsule JSON per product)`);
+    for (const d of m.duplicates) skipped.push(`• ${d.jsons.map(name).join(" + ")} — several files for ${photoLabel(d.photo)}`);
+    if (skipped.length) lines.push("Not imported:\n" + skipped.join("\n"));
+    if (!m.matched.length) {
+        await showDialog("Import Capsule JSON", lines.join("\n\n") || "No file matched a photo.", []);
+        return;
+    }
+    const st = new Map();
+    for (const x of m.matched) st.set(x.photo, capsuleMod.entryStatus(capsuleStore.items[capsuleMod.storeKey(x.photo)], null));
+    const replacing = m.matched.filter((x) => st.get(x.photo) !== "missing").length;
+    const withEdits = m.matched.filter((x) => st.get(x.photo) === "manual").length;
+    if (replacing) lines.push(`${replacing} photo${replacing === 1 ? " already has" : "s already have"} Capsule data — it will be replaced` +
+        (withEdits ? `; ${withEdits} of them ${withEdits === 1 ? "has" : "have"} your adjustments.` : "."));
+    const buttons = withEdits
+        ? [{ label: "Import — Keep My Adjustments", value: "keep" }, { label: "Import — Discard My Adjustments", value: "drop", danger: true }]
+        : [{ label: `Import ${m.matched.length} File${m.matched.length === 1 ? "" : "s"}`, value: "keep" }];
+    const answer = await showDialog("Import Capsule JSON", lines.join("\n\n"), buttons);
+    if (answer !== "keep" && answer !== "drop") return;
+    const done = [], failed = [], notes = [];
+    for (const x of m.matched) {
+        const r = await capsuleMod.importFile(capsuleStore, x.photo, x.json, answer === "keep");
+        if (r.ok) { done.push(x); for (const w of r.warnings) notes.push(`${photoLabel(x.photo)}: ${w}`); }
+        else failed.push(`✗ ${name(x.json)}: ${r.errors.join("; ")}`);
+    }
+    try {
+        if (done.length) await capsuleMod.saveCapsuleStore(capsuleStore);
+    } catch (e) {
+        setCapsuleMessage("Couldn't save the Capsule data: " + errorText(e));
+        await loadCapsule();
+        return;
+    }
+    setCapsuleMessage([`✓ Imported ${done.length} Capsule JSON file${done.length === 1 ? "" : "s"}` +
+        (failed.length ? ` · ✗ ${failed.length} rejected` : "") + (done.length ? " — Generate (or ⋯ → Regenerate .indd) to apply." : "")]
+        .concat(failed.slice(0, 5), notes.slice(0, 5).map((n) => "Note — " + n), skipped.length ? [`${skipped.length} file(s) not imported (see the list before).`] : []).join("\n"));
+    await refreshCapsuleSummary();
+    renderTable();
+}
+
+// ⋯ → Import Capsule JSON…: one JSON for THIS product's photo. A file named
+// differently from the photo is only used after an explicit confirmation.
+async function importCapsuleForRow(rec) {
+    if (!capsuleMod) { setMessage("capsule.js failed to load — see the banner above.", channels.generate); return; }
+    if (!outputEntry) { setMessage("Select the output folder (step 1) first — Capsule data is saved there.", channels.generate); return; }
+    let files;
+    try { files = await pickJsonFiles(false); } catch (e) { setMessage(errorText(e), channels.generate); return; }
+    if (!files.length) return;
+    const jsonPath = files[0].nativePath;
+    const jsonName = String(jsonPath).split("/").pop();
+    if (capsuleMod.baseName(jsonPath) !== capsuleMod.baseName(rec.imagePath)) {
+        const go = await showDialog("Use this JSON for this photo?",
+            `The file "${jsonName}" is named differently from the photo "${photoLabel(rec.imagePath)}".\n\n` +
+            "Only continue if this JSON was made from this exact photo — a box from another photo would place the product wrongly.",
+            [{ label: "Use for This Photo", value: "go", danger: true }]);
+        if (go !== "go") return;
+    }
+    await loadCapsule();
+    if (capsuleStore && capsuleStore.error) { setMessage("⚠ " + capsuleStore.error + " — nothing imported.", channels.generate); return; }
+    const old = capsuleEntryFor(rec);
+    let keep = true;
+    if (old) {
+        const edited = capsuleMod.entryStatus(old, null) === "manual";
+        const answer = await showDialog("Replace Capsule data?",
+            `${photoLabel(rec.imagePath)} already has Capsule data (from ${old.auto.sourceFile || "an earlier import"}).` +
+            (edited ? "\n\nYou adjusted the box or focal point for this photo." : ""),
+            edited ? [{ label: "Replace — Keep My Adjustments", value: "keep" }, { label: "Replace — Discard My Adjustments", value: "drop", danger: true }]
+                : [{ label: "Replace", value: "keep" }]);
+        if (answer !== "keep" && answer !== "drop") return;
+        keep = answer === "keep";
+    }
+    const r = await capsuleMod.importFile(capsuleStore, rec.imagePath, jsonPath, keep);
+    if (!r.ok) {
+        await loadCapsule(); // drop the unsaved in-memory change
+        setMessage(`✗ ${jsonName} was not imported:\n• ` + r.errors.join("\n• "), channels.generate);
+        return;
+    }
+    try { await capsuleMod.saveCapsuleStore(capsuleStore); } catch (e) {
+        setMessage("Couldn't save the Capsule data: " + errorText(e), channels.generate);
+        await loadCapsule();
+        return;
+    }
+    const p = products.get(rec);
+    setMessage([`✓ Capsule data imported for ${rec.headline} (${jsonName})` +
+        (p && p.exists ? " — ⋯ → Edit Subject Placement to check it, Regenerate .indd to apply it." : " — applied on Generate.")]
+        .concat(r.warnings.map((w) => "Note — " + w)).join("\n"), channels.generate);
+    await refreshCapsuleSummary();
+    renderTable();
+}
+
+// ⋯ → Keep Capsule Data for Changed Photo
+async function acceptChangedPhotoRow(rec) {
+    await loadCapsule();
+    if (!capsuleEntryFor(rec)) return;
+    const go = await showDialog("Keep Capsule data?",
+        `${photoLabel(rec.imagePath)} changed after its Capsule JSON was imported. Keep the data only if the photo still shows the product at the same place (e.g. it was only re-saved).`,
+        [{ label: "Keep Data for the Changed Photo", value: "go", danger: true }]);
+    if (go !== "go") return;
+    capsuleMod.acceptChangedPhoto(capsuleStore, rec.imagePath, await capsuleMod.photoFingerprint(rec.imagePath));
+    try { await capsuleMod.saveCapsuleStore(capsuleStore); } catch (e) { setMessage("Couldn't save the Capsule data: " + errorText(e), channels.generate); return; }
+    setMessage(`✓ Capsule data kept for ${rec.headline} — Regenerate .indd to apply it.`, channels.generate);
+    await refreshCapsuleSummary();
+    renderTable();
+}
+
+// Image Extension results on a product (any page, shown or hidden).
+function hasExtensionResults(s) {
+    const image = (s && s.image) || {};
+    return !!image.extension || EXTENDED.indexOf(image.status) !== -1 || image.status === "extension_hidden" || (image.versions || []).length > 0;
+}
+
+const EXTENSION_AFTER_SUBJECT_CHANGE = "Extension results from before the subject change exist — extend again or validate them before Commit";
+
+// ⋯ → Edit Subject Placement…: the editor window, then (on Apply) save the
+// edit and rebuild the affected product INDDs with the EXISTING Regenerate.
+async function editSubjectRow(rec) {
+    if (!capsuleMod || !capsuleEditor || !render) { setMessage("capsule.js / capsuleeditor.js failed to load — see the banner above.", channels.generate); return; }
+    if (!templatePaths.length) { setMessage("Prepare the template first (step 2) — the preview needs its layouts.", channels.generate); return; }
+    await loadCapsule();
+    const entry = capsuleEntryFor(rec);
+    const status = capsuleMod.entryStatus(entry, entry ? await capsuleMod.photoFingerprint(rec.imagePath) : null);
+    if (status === "missing") { setMessage(`${rec.headline}: import the Capsule JSON first (⋯ → Import Capsule JSON…).`, channels.generate); return; }
+    if (status === "stale") {
+        const a = await showDialog("Photo changed", `${photoLabel(rec.imagePath)} changed after its Capsule JSON was imported.`,
+            [{ label: "Import New JSON…", value: "import" }, { label: "Keep Data for the Changed Photo…", value: "keep" }]);
+        if (a === "import") await importCapsuleForRow(rec);
+        if (a === "keep") await acceptChangedPhotoRow(rec);
+        return;
+    }
+    const p = products.get(rec);
+    let pixelSize = entry.pixelSize;
+    if (!pixelSize) { try { pixelSize = (await capsuleMod.photoHeaderInfo(rec.imagePath)).pixelSize; } catch (e) {} }
+    if (!pixelSize) { setMessage(`${rec.headline}: the photo's pixel size can't be read (JPG / PNG / WebP only).`, channels.generate); return; }
+    let geometry;
+    setBusy(true);
+    startProgress(channels.generate, "Reading", `Reading the layouts of ${rec.headline}…`);
+    try {
+        if (!(await waitForInDesign())) throw new Error(NOT_READY);
+        geometry = await render.readPlacementGeometry(p && p.exists ? p.inddPath : "", templatePaths[0]);
+    } catch (e) {
+        setMessage("Couldn't read the layouts: " + errorText(e), channels.generate);
+        return;
+    } finally {
+        setBusy(false);
+    }
+    const layouts = geometry.pages.map((pg) => ({ layoutId: pg.layoutId, label: `${pg.layout.size} ${pg.layout.position} (page ${pg.page})` }));
+    const edited = Object.keys(entry.layouts || {});
+    const currentLayoutId = (layouts.find((l) => edited.indexOf(l.layoutId) !== -1) || layouts[0] || {}).layoutId || "";
+    const framesMode = placementMode() === "frames";
+    const subjectFor = (v) => ({ box: v.boundingBox, source: "capsule-manual", wholePhoto: capsuleMod.isWholePhotoBox(v.boundingBox),
+        focalPoint: v.focalPoint, capsule: { boxSource: "edited" } });
+    const info = [
+        `Photo: ${photoLabel(rec.imagePath)} (${pixelSize.width} × ${pixelSize.height} px) · imported from ${entry.auto.sourceFile || "Capsule JSON"}` +
+            (entry.auto.importedAt ? ` on ${shortTime(entry.auto.importedAt)}` : ""),
+        status === "manual" ? `Adjusted${edited.length ? ` (layout-specific: ${edited.join(", ")})` : ""} — Reset to Auto brings back the imported values.` : "As imported from Capsule.",
+    ].concat((entry.auto.warnings || []).map((w) => "Note — " + w));
+    const result = await capsuleEditor.showCapsuleEditor({
+        title: `Edit Subject Placement — ${rec.headline}`,
+        imagePath: rec.imagePath, pixelSize,
+        auto: { boundingBox: entry.auto.boundingBox, focalPoint: entry.auto.focalPoint },
+        current: capsuleMod.effectiveValues(entry, currentLayoutId),
+        info, layouts, currentLayoutId,
+        preview: (v) => geometry.pages.map((pg) => Object.assign({ layoutId: pg.layoutId }, render.previewPlacementForPage(pg, subjectFor(v), pixelSize, framesMode))),
+        previewNote: (geometry.source === "product" ? "Layouts of the generated product INDD (saved version)." : "Layouts of the Template Set — text areas from its placeholder text; generate the product for its real text.") +
+            ` Placement: ${framesMode ? "Custom Subject Frames" : "Auto Placement"}.`,
+    });
+    if (!result) return;
+    await applyCapsuleEdit(rec, result, layouts);
+}
+
+// Saves an editor result and (if the designer agrees) regenerates every
+// product that uses this photo — with the existing Regenerate warnings plus
+// what would be lost: completed (Committed / Exported) artwork and Image
+// Extension results made for the old placement. The Template Set is never changed.
+async function applyCapsuleEdit(rec, result, layouts) {
+    const key = capsuleMod.storeKey(rec.imagePath);
+    const affected = manifestRows.filter((r) => r.status === "matched" && r.imagePath && capsuleMod.storeKey(r.imagePath) === key);
+    const existing = affected.filter((r) => products.get(r) && products.get(r).exists);
+    const layoutLabel = result.layoutId ? ((layouts || []).find((l) => l.layoutId === result.layoutId) || { label: result.layoutId }).label : "";
+    const names = (rs) => rs.slice(0, 6).map((r) => r.headline).join(", ") + (rs.length > 6 ? ` …(+${rs.length - 6})` : "");
+    const completed = existing.filter((r) => { const s = getStatus(products.get(r).inddPath); return !!(s && (s.committedAt || s.exportedAt)); });
+    const extended = existing.filter((r) => hasExtensionResults(getStatus(products.get(r).inddPath)));
+    const open = existing.filter((r) => render.isInddOpen(products.get(r).inddPath));
+    const lines = [`Subject change for ${photoLabel(rec.imagePath)} — ${result.action === "apply_layout" ? `layout ${layoutLabel} only` : "all layouts"}.`,
+        `Products using this photo: ${names(affected)}.`];
+    if (existing.length) lines.push("Regenerating will replace the current INDD and may discard manual edits.");
+    if (completed.length) lines.push(`⚠ Completed artwork: ${names(completed)} ${completed.length === 1 ? "is" : "are"} Committed / Exported. Regenerating sends ${completed.length === 1 ? "it" : "them"} back for review — commit and export again. JPGs already exported are not deleted.`);
+    if (extended.length) lines.push(`⚠ Image Extension results exist for ${names(extended)}. They were made for the old placement: the regenerated INDD starts without them — extend again (or check Use Existing Extension) before Commit.`);
+    if (open.length) lines.push(`Open in InDesign: ${names(open)} — closed without saving first.`);
+    lines.push("The Template Set is not changed. Save Only keeps the INDDs as they are until the next Generate / Regenerate.");
+    const answer = await showDialog("Apply subject change?", lines.join("\n\n"), [
+        { label: existing.length ? "Save & Regenerate" : "Save & Generate", value: "go", danger: existing.length > 0 },
+        { label: "Save Only", value: "save" },
+    ]);
+    if (answer !== "go" && answer !== "save") { setMessage(`${rec.headline}: subject change discarded — nothing saved.`, channels.generate); return; }
+    await loadCapsule();
+    try {
+        if (!capsuleMod.saveEdit(capsuleStore, rec.imagePath, result.values, result.layoutId || "")) throw new Error("no Capsule data for this photo");
+        await capsuleMod.saveCapsuleStore(capsuleStore);
+    } catch (e) {
+        setMessage("Couldn't save the subject change: " + errorText(e), channels.generate);
+        await loadCapsule();
+        return;
+    }
+    await refreshCapsuleSummary();
+    if (answer === "save") {
+        setMessage(`✓ Subject change saved for ${photoLabel(rec.imagePath)} — applied on the next Generate / Regenerate .indd.`, channels.generate);
+        renderTable();
+        return;
+    }
+    try {
+        for (const r of open) await render.closeIndd(products.get(r).inddPath);
+        const extendedPaths = extended.map((r) => products.get(r).inddPath.toLowerCase());
+        const res = await runGenerate(affected, `Applying the subject change to ${affected.length} product(s)…`);
+        for (const g of res.generated) {
+            if (extendedPaths.indexOf(String(g.inddPath).toLowerCase()) === -1) continue;
+            const s = getStatus(g.inddPath) || {};
+            setStatus(g.inddPath, { status: "review", warnings: (s.warnings || []).concat([EXTENSION_AFTER_SUBJECT_CHANGE]) });
+        }
+        renderTable();
+        if (res.generated.length === 1) { try { await render.openIndd(res.generated[0].inddPath); } catch (e) {} }
+        summarize(res.generated.length ? `✓ Subject change applied — regenerated ${res.generated.length} INDD(s)` +
+            (extended.length ? " · ⚠ re-check Image Extension" : "") : "✗ Regenerate failed", res, channels.generate);
+    } catch (e) {
+        setMessage(errorText(e), channels.generate);
+    }
+}
+
 // ---------- init ----------
 
 async function init() {
@@ -657,6 +1053,10 @@ function resetPanel() {
     showContext();
     if (el.framesSummary) el.framesSummary.textContent = "";
     showPlacementMode();
+    capsuleStore = null;
+    if (el.capsuleSummary) el.capsuleSummary.textContent = "";
+    setCapsuleMessage("");
+    showSubjectSource();
     updateButtons();
 }
 
@@ -864,6 +1264,9 @@ el.btnOutput.addEventListener("click", async () => {
     remember(STORE.output, entry.nativePath);
     showContext();
     await refreshProducts();
+    await loadCapsule(); // Capsule data lives in the output folder
+    setCapsuleMessage("");
+    await refreshCapsuleSummary();
     renderTable();
     updateButtons();
 });
@@ -903,6 +1306,7 @@ el.btnMatch.addEventListener("click", async () => {
     } finally {
         setBusy(false);
     }
+    await refreshCapsuleSummary();
 });
 
 // ---------- product table ----------
@@ -998,6 +1402,18 @@ function pagesNeedingExtension(s) {
 function subjectLine(s) {
     const subj = s && s.subject;
     if (!subj) return null;
+    const c = subj.capsule;
+    if (c && (c.status === "missing" || c.status === "stale")) {
+        return ["detail-warning", c.status === "stale" ? "Subject ⚠ Missing Detection Data — photo changed since the Capsule import"
+            : "Subject ⚠ Missing Detection Data — default placement"];
+    }
+    const line = originalSubjectLine(subj);
+    if (c && line) line[1] += c.status === "manual" ? " · Capsule (adjusted)" : " · Capsule";
+    return line;
+}
+
+// The original plugin's subject status line (any subject source).
+function originalSubjectLine(subj) {
     if (subj.inFrame) return ["detail-muted", "Subject ✓ In red frame"];
     // Custom Subject Frames chosen, but no frame could be used for this product.
     if (subj.mode === "frames" && subj.zones) {
@@ -1010,6 +1426,17 @@ function subjectLine(s) {
             "Subject — Busy photo, normal placement (adjust by hand if needed)"];
     }
     return subj.detected ? ["detail-muted", "Subject ✓ Auto-centred"] : ["detail-muted", "Subject — Default placement"];
+}
+
+// Capsule mode: the stored Capsule data changed after this INDD was made
+// (imported for a photo that had none, or edited) → "Regenerate to apply".
+function capsulePendingLine(rec, s) {
+    if (subjectSource() !== "capsule" || !capsuleMod || !s || !s.subject || !s.updatedAt) return null;
+    const entry = capsuleEntryFor(rec);
+    if (!entry || !entry.auto) return null;
+    const changed = [entry.auto.importedAt, entry.manual && entry.manual.editedAt]
+        .concat(Object.values(entry.layouts || {}).map((l) => l.editedAt)).filter(Boolean).some((t) => t > s.updatedAt);
+    return changed ? ["detail-warning", "Subject ↻ Capsule data changed — Regenerate .indd to apply"] : null;
 }
 
 // Which Image Extension controls a product shows.
@@ -1043,6 +1470,9 @@ function detailLines(rec, state, s) {
     const image = s && s.image;
     if (image) lines.push(imageLine(image));
     if (s && s.subject && s.subject.mode === "frames" && s.subject.zones && !s.subject.inFrame) lines.push(subjectLine(s));
+    // Capsule data imported / edited after this INDD was generated.
+    const pending = capsulePendingLine(rec, s);
+    if (pending) lines.push(pending);
     lines.push(...warningSummary(s));
     return lines;
 }
@@ -1054,6 +1484,8 @@ function detailLines(rec, state, s) {
 //   out: the Image line already says it.
 const WARNING_GROUPS = [
     { test: /MainImage frame is empty/i, cls: "detail-error", text: "✗ Image missing" },
+    { test: /Missing Detection Data/i, cls: "detail-warning", text: "⚠ Missing Detection Data" },
+    { test: /before the subject change/i, cls: "detail-warning", text: "⚠ Re-check image extension (subject changed)" },
     { test: /low text contrast/i, cls: "detail-warning", text: "⚠ Text contrast needs review" },
     { test: /doesn't fit its frame|broken across lines/i, cls: "detail-warning", text: "⚠ Text doesn't fit" },
     { test: /red subject frame|subject is bigger|part of the subject|busy image|covers the whole photo/i, cls: "detail-warning", text: "⚠ Subject placement needs review" },
@@ -1108,6 +1540,12 @@ function productDetailText(rec, p, s) {
     const out = [p.inddPath.split("/").pop()];
     if (rec.imagePath) out.push("Photo: " + rec.imagePath.split("/").pop());
     if (s && s.subject && !s.subject.detected && s.subject.reason) out.push("Subject: " + s.subject.reason);
+    const c = s && s.subject && s.subject.capsule;
+    if (c && c.status !== "missing" && c.status !== "stale") {
+        out.push(`Capsule: ${c.file || "imported"} · box ${c.boxSource === "auto" ? "as imported" : "adjusted"} · focal point ${c.focalSource === "auto" ? "as imported" : "adjusted"} (not used by placement)` +
+            (c.edges && c.edges.length ? ` · box touches the photo's ${c.edges.join(" / ")} edge` : "") +
+            (c.layoutEdits && c.layoutEdits.length ? ` · layout-specific: ${c.layoutEdits.join(", ")}` : ""));
+    }
     for (const w of ((s && s.warnings) || []).slice(0, 8)) {
         out.push("• " + String(w)
             .replace(/\s*—\s*extension required.*$/i, "")
@@ -1296,7 +1734,8 @@ async function runGenerate(rows, title) {
     try {
         if (!(await waitForInDesign())) throw new Error(NOT_READY);
         const result = await render.generateIndds(rows, templatePaths, outputEntry.nativePath,
-            progressTo(channels.generate), { placementMode: placementMode(), useChoices: FEATURES.chooseSubject, textColor: textColorOptions() });
+            progressTo(channels.generate), { placementMode: placementMode(), useChoices: FEATURES.chooseSubject, textColor: textColorOptions(),
+                subjectSource: subjectSource() });
         recordGeneration(result);
         await refreshProducts();
         return result;
@@ -1312,6 +1751,8 @@ el.btnGenerate.addEventListener("click", async () => {
     }
     // Generate All replaces existing INDDs — including any manual edits.
     await refreshProducts();
+    // Capsule mode: photos without Capsule data only with an explicit OK.
+    if (!(await confirmCapsuleCoverage(manifestRows))) return;
     const existing = [...products.values()].filter((p) => p.exists).length;
     if (existing) {
         const go = await showDialog("Generate All .indd",
@@ -1637,6 +2078,22 @@ async function productActions(rec) {
         image.status === "extension_hidden" || !!image.extension;
     const subjectGroup = FEATURES.chooseSubject && rec.imagePath && subjectMod && pickerMod
         ? [{ header: "Subject" }, { label: "Choose Subject…", value: "choose_subject" }] : [];
+    // Capsule mode: import / edit this photo's Capsule data (live status).
+    if (subjectSource() === "capsule" && capsuleMod && rec.imagePath && outputEntry) {
+        await loadCapsule();
+        const entry = capsuleEntryFor(rec);
+        const cst = capsuleMod.entryStatus(entry, entry ? await capsuleMod.photoFingerprint(rec.imagePath) : null);
+        const text = {
+            missing: ["detail-warning", "Capsule ⚠ Missing Detection Data — import the JSON"],
+            stale: ["detail-warning", "Capsule ⚠ The photo changed after the import"],
+            auto: ["detail-muted", `Capsule ✓ ${entry && entry.auto.sourceFile ? entry.auto.sourceFile : "imported"}`],
+            manual: ["detail-muted", `Capsule ✓ ${entry && entry.auto.sourceFile ? entry.auto.sourceFile : "imported"} · adjusted`],
+        }[cst];
+        subjectGroup.push({ header: "Subject (Capsule)" }, { status: [text] },
+            { label: cst === "missing" ? "Import Capsule JSON…" : "Re-import Capsule JSON…", value: "capsule_import" });
+        if (cst === "auto" || cst === "manual") subjectGroup.push({ label: "Edit Subject Placement…", value: "capsule_edit" });
+        if (cst === "stale") subjectGroup.push({ label: "Keep Capsule Data for Changed Photo…", value: "capsule_keep" });
+    }
     const doc = [{ header: "Document" }];
     if (p.exists) doc.push({ label: "Preview", value: "preview" });
     doc.push({ label: p.exists ? "Regenerate .indd" : "Generate .indd", value: "regenerate", danger: p.exists });
@@ -1664,6 +2121,9 @@ async function productActions(rec) {
     const answer = await showDialog(rec.headline, "", entries, { withText: true, closeLabel: stored ? "Close" : "Cancel" });
     const choice = answer.value;
     if (choice === "choose_subject") await chooseSubjectRow(rec);
+    if (choice === "capsule_import") await importCapsuleForRow(rec);
+    if (choice === "capsule_edit") await editSubjectRow(rec);
+    if (choice === "capsule_keep") await acceptChangedPhotoRow(rec);
     if (choice === "preview") await previewRow(rec);
     if (choice === "regenerate") await regenerateRow(rec);
     if (choice === "output") await openOutputFolder(p.subType);
@@ -1760,6 +2220,7 @@ async function chooseSubjectRow(rec, forceDetect) {
 // confirmed that manual edits will be discarded.
 async function regenerateRow(rec) {
     const p = products.get(rec);
+    if (!(await confirmCapsuleCoverage([rec]))) return;
     const open = p.exists && render.isInddOpen(p.inddPath);
     if (p.exists) {
         const go = await showDialog("Regenerate .indd?",

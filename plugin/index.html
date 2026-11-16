@@ -42,6 +42,18 @@
     </section>
     <section class="step">
         <h2>3. Subject Placement</h2>
+        <!-- Where the subject box comes from. Placement below is the same either way. -->
+        <div class="source-row">
+            <span class="source-caption">Subject detection:</span>
+            <button id="src-capsule" class="btn-small" title="Use the JSON downloaded from Adobe Capsule (Detect Focal Point) — no backend call">Capsule JSON</button>
+            <button id="src-api" class="btn-small" title="The original automatic detection through the team backend">Backend API</button>
+        </div>
+        <div id="capsule-actions" class="capsule-actions hidden">
+            <div class="hint">Import the JSON that Adobe Capsule (Detect Focal Point) downloads for each original photo — name it like the photo (car_01.jpg → car_01.json), or import it per product with ⋯ → Import Capsule JSON. Check or adjust the box with ⋯ → Edit Subject Placement.</div>
+            <button id="btn-capsule-import" class="btn-small">Import Capsule JSON Files…</button>
+            <div id="capsule-summary" class="summary"></div>
+            <div id="capsule-message" class="run-message"></div>
+        </div>
         <div id="mode-auto" class="mode-option mode-selected" data-mode="auto">
             <div class="mode-radio"></div>
             <div class="mode-text">
