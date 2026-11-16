@@ -883,3 +883,183 @@ button.btn-attention {
 button.btn-quiet {
     opacity: 0.8;
 }
+
+/* ---------- Capsule subject source (step 3) ---------- */
+
+.source-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+}
+
+.source-caption {
+    font-size: 11px;
+    color: #bbb;
+    margin-right: 6px;
+}
+
+.source-row button {
+    margin: 0 4px 0 0;
+}
+
+button.source-selected {
+    border-color: #4d9de0;
+    color: #fff;
+    background: #3a3f4a;
+}
+
+.capsule-actions {
+    margin: 0 0 8px;
+    padding: 6px 8px;
+    border: 1px solid #4a4a4a;
+    border-radius: 4px;
+}
+
+.capsule-actions.hidden {
+    display: none;
+}
+
+/* ---------- Edit Subject Placement window (capsuleeditor.js) ---------- */
+
+.capsule-stage {
+    cursor: crosshair;
+}
+
+.capsule-auto-box {
+    position: absolute;
+    border: 1px dashed #ffffff;
+    opacity: 0.8;
+}
+
+.capsule-auto-focal {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border: 1px solid #ffffff;
+    border-radius: 5px;
+}
+
+.capsule-edit-box {
+    position: absolute;
+    border: 2px solid #5ad16b;
+    background-color: rgba(90, 209, 107, 0.08);
+    cursor: move;
+}
+
+.capsule-handle {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    background: #5ad16b;
+    border: 1px solid #111;
+}
+
+.capsule-edit-focal {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    border: 2px solid #111;
+    border-radius: 7px;
+    background: #ffd24d;
+}
+
+.capsule-legend {
+    font-size: 10px;
+    color: #aaa;
+    margin-bottom: 6px;
+}
+
+.capsule-fields {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.capsule-field {
+    display: flex;
+    flex-direction: column;
+    margin: 0 6px 4px 0;
+}
+
+.capsule-field-label {
+    font-size: 10px;
+    color: #bbb;
+}
+
+.capsule-input {
+    width: 72px;
+    font-size: 11px;
+}
+
+.capsule-error {
+    font-size: 11px;
+    color: #ff8a8a;
+    margin-bottom: 4px;
+}
+
+.capsule-layout-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.capsule-select {
+    font-size: 11px;
+}
+
+.capsule-grid {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+}
+
+.capsule-cell {
+    width: 160px;
+    margin: 0 8px 8px 0;
+    padding: 4px;
+    border: 1px solid #4a4a4a;
+    border-radius: 3px;
+}
+
+.capsule-cell-current {
+    border-color: #4d9de0;
+}
+
+.capsule-cell-title {
+    font-size: 10px;
+    color: #ddd;
+    margin-top: 3px;
+}
+
+.capsule-cell-warning {
+    font-size: 10px;
+    color: #ffd479;
+}
+
+.capsule-cell-note {
+    font-size: 10px;
+    color: #999;
+}
+
+/* Preview diagram: page, frame, text, red frame, placed photo, subject. */
+.capsule-diagram {
+    position: relative;
+    overflow: hidden;
+    background: #1e1e1e;
+}
+
+.dg-page, .dg-graphic, .dg-frame, .dg-text, .dg-zone, .dg-subject, .dg-focal {
+    position: absolute;
+}
+
+.dg-page { background: #5a5a5a; }
+.dg-graphic { background: rgba(77, 157, 224, 0.55); }
+.dg-frame { border: 1px solid #eeeeee; }
+.dg-text { background: rgba(30, 30, 30, 0.55); border: 1px solid #999; }
+.dg-zone { border: 1px dashed #ff4d4d; }
+.dg-subject { border: 2px solid #5ad16b; }
+.dg-focal { width: 6px; height: 6px; border-radius: 3px; background: #ffd24d; }

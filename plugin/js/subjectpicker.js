@@ -237,4 +237,4 @@ async function showSubjectPicker(options) {
     return closed;
 }
 
-module.exports = { PICKER, toBase64, previewSize, boxToPixels, objectLabel, showSubjectPicker };
+module.exports = { PICKER, toBase64, previewSize, boxToPixels, objectLabel, showSubjectPicker, photoDataUrl };
