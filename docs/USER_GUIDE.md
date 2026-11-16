@@ -101,7 +101,12 @@ A `⚠` next to a page explains what's missing, e.g. a layer or frame. Fix it in
 
 ### Step 3: Subject Placement
 
-Pick one of two options:
+**Subject detection** — where the plugin learns where the car is in each photo:
+
+- **Capsule JSON** (default) — run **Detect Focal Point** in Adobe Capsule for each original photo and download the JSON. Name it like the photo (`car_01.jpg` → `car_01.json`) and click **Import Capsule JSON Files…**, or import one file per product with **⋯ → Import Capsule JSON…**. Check or adjust the box and focal point with **⋯ → Edit Subject Placement…**. A product without a JSON is reported as **Missing Detection Data** before generating; you can import it or continue with the default placement (the product is then marked ⚠ Review). See [Capsule Subject Placement](CAPSULE_SUBJECT_PLACEMENT.md).
+- **Backend API** — the original automatic detection through the team backend.
+
+The placement itself is the same with both. Then pick one of two options:
 
 - **Auto Placement** — nothing to do. Each product is found in its photo and put in the middle of the empty part of the picture, never under the text. A small product is enlarged to 70–80% of the picture. If the text takes up so much room that this isn't possible next to it, the product overlaps the text area a little — check those pages and move the text or the photo by hand if needed.
 - **Custom Subject Frames** — click **Add Default Frames**. The template opens with a red frame on every page. Move or resize the red frames to where the product should go, click **Save Frame Changes**, then click **Generate**. While a change isn't saved yet, the panel shows a yellow reminder. The red frames never appear in the final images. **Reset Frames** brings the default frames back.
@@ -161,6 +166,7 @@ The most common warnings:
 
 - **"doesn't fit its frame"**: the text is too long and part of it would be cut off. Shorten the text or enlarge the frame in the product's file.
 - **"MainImage frame is empty"**: the photo is missing on that page. Place it again, or regenerate the product.
+- **"Missing Detection Data"** (Capsule JSON mode): no Capsule JSON was imported for the photo, or the photo changed after the import. The product was placed the default way. Import the JSON (**⋯ → Import Capsule JSON…**) and regenerate.
 
 ---
 
@@ -177,6 +183,7 @@ Output folder/
   output/                      ← FINAL images, sorted by size
     DANIS/    1200x1200/ …
     Service/  250x250/ · 800x600/ · 1080x1920/ · 1200x1200/ …
+  capsule_subjects.json        ← imported Capsule detections + your adjustments (Capsule JSON mode)
   generation_log.csv           ← details of the last Generate
   export_log.csv               ← details of the last Export
 ```
