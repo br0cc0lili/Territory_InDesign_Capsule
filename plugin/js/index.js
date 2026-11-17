@@ -100,6 +100,10 @@ const el = {
     capsuleActions: document.getElementById("capsule-actions"),
     btnCapsuleImport: document.getElementById("btn-capsule-import"),
     btnCapsulePaste: document.getElementById("btn-capsule-paste"),
+    capsulePasteText: document.getElementById("capsule-paste-text"),
+    capsulePasteStatus: document.getElementById("capsule-paste-status"),
+    capsulePastePhoto: document.getElementById("capsule-paste-photo"),
+    btnCapsulePasteImport: document.getElementById("btn-capsule-paste-import"),
     capsuleSummary: document.getElementById("capsule-summary"),
     capsuleMessage: document.getElementById("capsule-message"),
     activeActions: document.getElementById("active-actions"),
@@ -289,7 +293,8 @@ function updateButtons() {
     el.btnExport.disabled = busy || !outputEntry || committedRows().length === 0;
     el.btnDmPrepare.disabled = busy || !excelEntry;
     if (el.btnCapsuleImport) el.btnCapsuleImport.disabled = busy || !outputEntry;
-    if (el.btnCapsulePaste) el.btnCapsulePaste.disabled = busy || !outputEntry;
+    if (el.btnCapsulePaste) el.btnCapsulePaste.disabled = busy;
+    if (el.btnCapsulePasteImport) updatePasteState(true);
 }
 
 function setBusy(on) {
@@ -684,6 +689,7 @@ async function refreshCapsuleSummary() {
     if (capsuleStore && capsuleStore.error) { el.capsuleSummary.textContent = "⚠ " + capsuleStore.error; return; }
     const stored = capsuleStore ? Object.keys(capsuleStore.items).length : 0;
     if (!hasMatchedRows()) {
+        fillPastePhotos(null);
         el.capsuleSummary.textContent = `Capsule data for ${stored} photo${stored === 1 ? "" : "s"} in this output folder — Match (step 4) to see which products still need it.`;
         return;
     }
@@ -696,6 +702,7 @@ async function refreshCapsuleSummary() {
     if (n.missing) parts.push(`⚠ ${n.missing} Missing Detection Data`);
     if (n.stale) parts.push(`⚠ ${n.stale} photo${n.stale === 1 ? "" : "s"} changed since import`);
     el.capsuleSummary.textContent = parts.join(" · ");
+    fillPastePhotos(st);
 }
 
 function setSubjectSource(source) {
@@ -709,7 +716,13 @@ if (el.srcCapsule) {
     el.srcCapsule.addEventListener("click", () => setSubjectSource("capsule"));
     el.srcApi.addEventListener("click", () => setSubjectSource("api"));
     el.btnCapsuleImport.addEventListener("click", () => importCapsuleFiles());
-    if (el.btnCapsulePaste) el.btnCapsulePaste.addEventListener("click", () => pasteCapsuleJson(null));
+    if (el.btnCapsulePaste) el.btnCapsulePaste.addEventListener("click", () => pasteFromClipboard());
+    if (el.capsulePasteText) {
+        el.capsulePasteText.addEventListener("input", () => updatePasteState());
+        el.capsulePasteText.addEventListener("change", () => updatePasteState());
+        el.capsulePastePhoto.addEventListener("change", () => updatePasteState());
+        el.btnCapsulePasteImport.addEventListener("click", () => importPasted());
+    }
 }
 
 // Before Generate / Regenerate in Capsule mode: photos without valid
@@ -736,11 +749,9 @@ async function confirmCapsuleCoverage(rows) {
     if (stale.length) lines.push(`${stale.length} photo${stale.length === 1 ? "" : "s"} changed after the Capsule JSON was imported:\n${list(stale)}`);
     lines.push("\nYou can continue with the original plugin's default placement (no subject box). These products are marked Review — Missing Detection Data. The backend API is not used.");
     const answer = await showDialog("Missing Detection Data", lines.join("\n\n"), [
-        { label: "Paste Capsule JSON…", value: "paste" },
         { label: "Import Capsule JSON Files…", value: "import" },
         { label: "Continue with Default Placement", value: "go", danger: true },
     ]);
-    if (answer === "paste") { await pasteCapsuleJson(null); return false; }
     if (answer === "import") { await importCapsuleFiles(); return false; }
     return answer === "go";
 }
@@ -852,62 +863,122 @@ async function confirmReplaceCapsule(imagePath) {
     return answer === "keep";
 }
 
-// Step 3 → Paste Capsule JSON… (rec = null) or ⋯ → Paste Capsule JSON…
-// (rec = that product): the JSON copied from the Capsule workflow's Preview.
-// Pasted text has no file name, so the designer picks the photo — the box is
-// shown on it before anything is saved.
-async function pasteCapsuleJson(rec) {
-    const say = (text) => (rec ? setMessage(text, channels.generate) : setCapsuleMessage(text));
-    if (!capsuleMod || !capsulePaste) { say("capsule.js / capsulepaste.js failed to load — see the banner above."); return; }
-    if (!outputEntry) { say("Select the output folder (step 1) first — Capsule data is saved there."); return; }
-    const paths = rec ? [rec.imagePath] : await ensureMatchedPhotos();
-    if (!paths || !paths.length || !paths[0]) return;
-    await loadCapsule();
-    if (capsuleStore && capsuleStore.error) { say("⚠ " + capsuleStore.error + " — nothing imported."); return; }
-    const st = await capsuleStatuses(rec ? [rec] : manifestRows);
+// ---------- Step 3 → Paste Capsule JSON (the box under the button) ----------
+// The JSON copied from the Capsule workflow's Preview node. Pasted text has no
+// file name, so the photo is never guessed: the designer chooses it in the
+// list ("Choose the photo…" until then) before Import for This Photo.
+
+// The photo list: one entry per matched photo, with its products and status.
+//   st: capsuleStatuses() Map, or null (not matched yet)
+function fillPastePhotos(st) {
+    const sel = el.capsulePastePhoto;
+    if (!sel || !capsuleMod) return;
+    const current = pasteSelectedPhoto();
+    const choices = [];
     const seen = new Set();
-    const photos = [];
-    for (const path of paths) {
-        const key = capsuleMod.storeKey(path);
+    for (const r of st ? manifestRows : []) {
+        if (r.status !== "matched" || !r.imagePath) continue;
+        const key = capsuleMod.storeKey(r.imagePath);
         if (seen.has(key)) continue;
         seen.add(key);
-        const users = manifestRows.filter((r) => r.status === "matched" && r.imagePath && capsuleMod.storeKey(r.imagePath) === key);
+        const names = manifestRows.filter((x) => x.status === "matched" && x.imagePath && capsuleMod.storeKey(x.imagePath) === key).map((x) => x.headline).filter(Boolean);
         const status = st.get(key) || "missing";
-        const entry = capsuleStore && capsuleStore.items[key];
-        const names = (rec ? [rec] : users).map((r) => r.headline).filter(Boolean);
-        photos.push({
-            imagePath: path,
-            status,
-            pixelSize: entry && entry.pixelSize ? entry.pixelSize : null,
-            label: (names.length ? names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "") + " — " : "") + photoLabel(path) +
-                (status === "missing" ? "  ·  no data" : status === "stale" ? "  ·  photo changed" : "  ·  has data"),
-        });
+        choices.push({ imagePath: r.imagePath, label: (names.length ? names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "") + " — " : "") +
+            photoLabel(r.imagePath) + (status === "missing" ? " · no data" : status === "stale" ? " · photo changed" : " · has data") });
     }
-    const picked = await capsulePaste.showCapsulePaste({
-        photos, selected: rec ? rec.imagePath : "", locked: !!rec,
-        parse: capsuleMod.parseCapsuleJson, clean: capsuleMod.cleanPastedText,
-    });
-    if (!picked) return;
-    const keep = await confirmReplaceCapsule(picked.imagePath);
+    sel.innerHTML = "";
+    const add = (value, label) => {
+        const o = document.createElement("option");
+        o.setAttribute("value", value);
+        o.textContent = label;
+        sel.appendChild(o);
+    };
+    add("", choices.length ? "Choose the photo this JSON was made from…" : "No matched photos yet — Match (step 4) first");
+    for (const c of choices) add(c.imagePath, c.label);
+    try { sel.value = choices.some((c) => c.imagePath === current) ? current : ""; } catch (e) {}
+    updatePasteState(true);
+}
+
+function pasteSelectedPhoto() {
+    try { return el.capsulePastePhoto ? String(el.capsulePastePhoto.value || "") : ""; } catch (e) { return ""; }
+}
+
+// Status line + Import button. A valid paste before Match runs Match (once),
+// so the photo list fills. noMatch: don't start Match (from setBusy etc.).
+let pasteMatching = false;
+function updatePasteState(noMatch) {
+    if (!el.capsulePasteText || !capsuleMod || !capsulePaste) return null;
+    const state = capsulePaste.pasteState(el.capsulePasteText.value, capsuleMod.parseCapsuleJson, capsuleMod.cleanPastedText);
+    const photo = pasteSelectedPhoto();
+    let text = capsulePaste.pasteStatusText(state);
+    if (state.ok && !photo && hasMatchedRows()) text += "\n→ Choose the photo it was made from, then Import for This Photo.";
+    el.capsulePasteStatus.textContent = text;
+    el.capsulePasteStatus.className = "paste-status" + (state.ok ? " paste-ok" : state.empty ? "" : " paste-bad");
+    el.btnCapsulePasteImport.disabled = busy || !outputEntry || !state.ok || !photo;
+    if (!noMatch && state.ok && !hasMatchedRows() && !pasteMatching && !busy && excelEntry && photosEntry) {
+        pasteMatching = true;
+        ensureMatchedPhotos().finally(() => { pasteMatching = false; });
+    }
+    return state;
+}
+
+// Paste Capsule JSON: the clipboard into the box (⌘V in the box works too).
+async function pasteFromClipboard() {
+    if (!capsulePaste || !el.capsulePasteText) return;
+    let text = "";
+    try { text = await capsulePaste.readClipboardText(); } catch (e) {
+        setCapsuleMessage("Couldn't read the clipboard — click in the box below and press ⌘V.");
+        return;
+    }
+    if (!String(text || "").trim()) { setCapsuleMessage("The clipboard is empty — click Copy on the Capsule workflow's Preview node first."); return; }
+    setCapsuleMessage("");
+    el.capsulePasteText.value = text;
+    updatePasteState();
+    try { el.capsulePasteText.focus(); } catch (e) {}
+}
+
+// Import for This Photo
+async function importPasted() {
+    if (!capsuleMod || !capsulePaste) { setCapsuleMessage("capsule.js / capsulepaste.js failed to load — see the banner above."); return; }
+    if (!outputEntry) { setCapsuleMessage("Select the output folder (step 1) first — Capsule data is saved there."); return; }
+    const state = updatePasteState(true);
+    if (!state || !state.ok) return;
+    const imagePath = pasteSelectedPhoto();
+    if (!imagePath) { setCapsuleMessage("Choose the photo this JSON was made from."); return; }
+    await loadCapsule();
+    if (capsuleStore && capsuleStore.error) { setCapsuleMessage("⚠ " + capsuleStore.error + " — nothing imported."); return; }
+    const keep = await confirmReplaceCapsule(imagePath);
     if (keep === null) return;
-    const r = await capsuleMod.importText(capsuleStore, picked.imagePath, picked.text, capsuleMod.pastedLabel(), keep);
+    const r = await capsuleMod.importText(capsuleStore, imagePath, capsuleMod.cleanPastedText(el.capsulePasteText.value), capsuleMod.pastedLabel(), keep);
     if (!r.ok) {
         await loadCapsule(); // drop the unsaved in-memory change
-        say("✗ The pasted JSON was not imported:\n• " + r.errors.join("\n• "));
+        setCapsuleMessage("✗ The pasted JSON was not imported:\n• " + r.errors.join("\n• "));
         return;
     }
     try { await capsuleMod.saveCapsuleStore(capsuleStore); } catch (e) {
-        say("Couldn't save the Capsule data: " + errorText(e));
+        setCapsuleMessage("Couldn't save the Capsule data: " + errorText(e));
         await loadCapsule();
         return;
     }
-    const users = manifestRows.filter((x) => x.status === "matched" && x.imagePath && capsuleMod.storeKey(x.imagePath) === capsuleMod.storeKey(picked.imagePath));
+    const users = manifestRows.filter((x) => x.status === "matched" && x.imagePath && capsuleMod.storeKey(x.imagePath) === capsuleMod.storeKey(imagePath));
     const anyIndd = users.some((x) => { const p = products.get(x); return p && p.exists; });
-    say([`✓ Capsule data pasted for ${photoLabel(picked.imagePath)}` + (users.length ? ` (${users.map((x) => x.headline).join(", ")})` : "") +
-        (anyIndd ? " — ⋯ → Edit Subject Placement to check it, Regenerate .indd to apply it." : " — applied on Generate.")]
+    setCapsuleMessage([`✓ Capsule data pasted for ${photoLabel(imagePath)}` + (users.length ? ` (${users.map((x) => x.headline).join(", ")})` : "") +
+        (anyIndd ? " — ⋯ → Edit Subject Placement to check it, Regenerate .indd to apply it." : " — check it with ⋯ → Edit Subject Placement; applied on Generate.")]
         .concat(r.warnings.map((w) => "Note — " + w)).join("\n"));
+    el.capsulePasteText.value = "";
+    try { el.capsulePastePhoto.value = ""; } catch (e) {}
     await refreshCapsuleSummary();
+    updatePasteState(true);
     renderTable();
+}
+
+// ⋯ → Paste Capsule JSON: selects this product's photo in the step 3 box.
+async function pasteForRow(rec) {
+    await refreshCapsuleSummary();
+    try { el.capsulePastePhoto.value = rec.imagePath; } catch (e) {}
+    updatePasteState(true);
+    try { el.capsulePasteText.focus(); } catch (e) {}
+    setMessage(`Paste the Capsule JSON into the box in step 3 — ${photoLabel(rec.imagePath)} (${rec.headline}) is selected there.`, channels.generate);
 }
 
 // ⋯ → Import Capsule JSON File…: one JSON for THIS product's photo. A file named
@@ -2200,7 +2271,7 @@ async function productActions(rec) {
             manual: ["detail-muted", `Capsule ✓ ${entry && entry.auto.sourceFile ? entry.auto.sourceFile : "imported"} · adjusted`],
         }[cst];
         subjectGroup.push({ header: "Subject (Capsule)" }, { status: [text] },
-            { label: cst === "missing" ? "Paste Capsule JSON…" : "Paste New Capsule JSON…", value: "capsule_paste" },
+            { label: "Paste Capsule JSON (Step 3)", value: "capsule_paste" },
             { label: cst === "missing" ? "Import Capsule JSON File…" : "Re-import Capsule JSON File…", value: "capsule_import" });
         if (cst === "auto" || cst === "manual") subjectGroup.push({ label: "Edit Subject Placement…", value: "capsule_edit" });
         if (cst === "stale") subjectGroup.push({ label: "Keep Capsule Data for Changed Photo…", value: "capsule_keep" });
@@ -2232,7 +2303,7 @@ async function productActions(rec) {
     const answer = await showDialog(rec.headline, "", entries, { withText: true, closeLabel: stored ? "Close" : "Cancel" });
     const choice = answer.value;
     if (choice === "choose_subject") await chooseSubjectRow(rec);
-    if (choice === "capsule_paste") await pasteCapsuleJson(rec);
+    if (choice === "capsule_paste") await pasteForRow(rec);
     if (choice === "capsule_import") await importCapsuleForRow(rec);
     if (choice === "capsule_edit") await editSubjectRow(rec);
     if (choice === "capsule_keep") await acceptChangedPhotoRow(rec);

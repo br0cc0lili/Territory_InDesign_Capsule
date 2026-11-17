@@ -122,14 +122,13 @@ storage["posterBatch.templatePaths"] = JSON.stringify([TPL]);
 const dialogs = [];
 const answers = [];
 const editorAnswers = [];
-const pasteAnswers = [];
 const sandboxRequire = (r) => {
     if (r === "uxp") return uxp;
     if (r === "indesign") return { app: {} };
     if (r === "./js/render.js") return render;
     if (r === "./js/matcher.js") return { buildManifest: async () => ROWS.map((x) => Object.assign({}, x)) };
     if (r === "./js/capsule.js") return capsule;
-    if (r === "./js/capsulepaste.js") return { showCapsulePaste: async (opts) => { const a = pasteAnswers.shift(); return typeof a === "function" ? a(opts) : a; } };
+    if (r === "./js/capsulepaste.js") return require(PLUGIN + "/js/capsulepaste.js");
     if (r === "./js/capsuleeditor.js") return { showCapsuleEditor: async (opts) => { const a = editorAnswers.shift(); return typeof a === "function" ? a(opts) : a; } };
     return {};
 };
@@ -148,7 +147,7 @@ const sandbox = {
 vm.createContext(sandbox);
 let src = fs.readFileSync(PLUGIN + "/js/index.js", "utf8");
 src = src.replace("function showDialog(title, message, buttons, options) {", "function showDialog(title, message, buttons, options) { if (globalThis.__dialog) return globalThis.__dialog(title, message, buttons, options);");
-src += "\n;globalThis.__panel = { init, subjectSource, setSubjectSource, refreshCapsuleSummary, confirmCapsuleCoverage, importCapsuleFiles, importCapsuleForRow, pasteCapsuleJson, editSubjectRow, regenerateRow, productActions, subjectLine, warningSummary, getStatus, setStatus, capsulePendingLine, rows: () => manifestRows };";
+src += "\n;globalThis.__panel = { init, subjectSource, setSubjectSource, refreshCapsuleSummary, confirmCapsuleCoverage, importCapsuleFiles, importCapsuleForRow, editSubjectRow, regenerateRow, productActions, subjectLine, warningSummary, getStatus, setStatus, capsulePendingLine, rows: () => manifestRows };";
 vm.runInContext(src, sandbox, { filename: "index.js" });
 const P = sandbox.__panel;
 const text = (id) => nodes[id] ? nodes[id].textContent : "";
@@ -203,7 +202,7 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     await nodes["btn-generate"].fire("click");
     const md = dialogs[dialogs.length - 1];
     ok(md.title === "Missing Detection Data" && /A3 — A3\/hero\.jpg/.test(md.message) && !/A6 Avant —/.test(md.message), "Generate All: lists only the product without Capsule data");
-    ok(md.buttons.join("|") === "Paste Capsule JSON…|Import Capsule JSON Files…|Continue with Default Placement", "choices: paste, import, or continue with the default placement");
+    ok(md.buttons.join("|") === "Import Capsule JSON Files…|Continue with Default Placement", "choices: import, or continue with the default placement");
     ok(calls.generate.length === 0, "Cancel → nothing generated");
     answers.push({ pick: /Continue with Default Placement/ }, { pick: /Replace and Generate All/ });
     await nodes["btn-generate"].fire("click");
@@ -233,12 +232,12 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     answers.push(null);
     await P.productActions(rowOf("A3"));
     const menu = dialogs[dialogs.length - 1];
-    ok(menu.buttons.indexOf("Paste Capsule JSON…") !== -1 && menu.buttons.indexOf("Import Capsule JSON File…") !== -1 && menu.buttons.indexOf("Edit Subject Placement…") === -1 &&
+    ok(menu.buttons.indexOf("Paste Capsule JSON (Step 3)") !== -1 && menu.buttons.indexOf("Import Capsule JSON File…") !== -1 && menu.buttons.indexOf("Edit Subject Placement…") === -1 &&
         menu.entries.some((e) => e.status && /Missing Detection Data/.test(e.status[0][1])), "⋯ (no data): status + Paste + Import, no Edit");
     answers.push(null);
     await P.productActions(rowOf("A6 Avant"));
     const menu2 = dialogs[dialogs.length - 1];
-    ok(menu2.buttons.indexOf("Paste New Capsule JSON…") !== -1 && menu2.buttons.indexOf("Re-import Capsule JSON File…") !== -1 && menu2.buttons.indexOf("Edit Subject Placement…") !== -1,
+    ok(menu2.buttons.indexOf("Paste Capsule JSON (Step 3)") !== -1 && menu2.buttons.indexOf("Re-import Capsule JSON File…") !== -1 && menu2.buttons.indexOf("Edit Subject Placement…") !== -1,
         "⋯ (data): Paste New + Re-import + Edit Subject Placement");
 
     // Edit → Apply to all layouts → warnings → Save & Regenerate
@@ -323,38 +322,45 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     ok(dialogs[dialogs.length - 1].title === "Missing Detection Data" && calls.generate.length === g3, "⋯ → Regenerate .indd: Missing Detection Data prompt first; Cancel → nothing");
     ok(!fs.existsSync(ROOT + "/tpl/SERVICE_Template_DataMerge.indd.bak") && fs.readFileSync(TPL, "utf8") === "template", "Template Set file untouched");
 
-    // Paste Capsule JSON (step 3): the designer picks the photo; nothing is guessed
+    // Paste Capsule JSON (the box in step 3): the designer picks the photo; nothing is guessed
     const COPIED = JSON.stringify(CAPSULE);
+    const box = nodes["capsule-paste-text"], sel = nodes["capsule-paste-photo"], imp = nodes["btn-capsule-paste-import"], pst = () => text("capsule-paste-status");
     const raw5 = fs.readFileSync(storeFile, "utf8");
-    pasteAnswers.push(null); // Cancel in the paste window
-    await nodes["btn-capsule-paste"].fire("click");
-    ok(fs.readFileSync(storeFile, "utf8") === raw5, "Paste → Cancel: nothing stored");
-    let pOpts = null;
-    pasteAnswers.push((opts) => { pOpts = opts; return { imagePath: P3, text: "{ broken" }; });
-    await P.pasteCapsuleJson(null);
-    ok(pOpts && !pOpts.locked && pOpts.photos.length === 3 && pOpts.selected === "", "Paste (step 3): every matched photo offered, none forced");
-    const a3 = pOpts.photos.find((x) => x.imagePath === P3);
-    ok(a3 && a3.status === "missing" && /^A3 — A3\/hero\.jpg · no data$/.test(a3.label.replace(/\s+·\s+/, " · ")), "Paste: photo labelled with product + status: " + (a3 && a3.label));
-    ok(/The pasted JSON was not imported:\n• not valid JSON/.test(text("capsule-message")) && fs.readFileSync(storeFile, "utf8") === raw5, "Paste of invalid text (should the window let it through) → rejected, nothing stored");
-    pasteAnswers.push({ imagePath: P3, text: COPIED });
-    await P.pasteCapsuleJson(null);
+    await P.refreshCapsuleSummary();
+    const labels = sel.children.map((o) => o.textContent);
+    ok(labels.length === 4 && labels[0] === "Choose the photo this JSON was made from…" && labels.indexOf("A3 — A3/hero.jpg · no data") !== -1 && labels.indexOf("A6 Avant — A6/car_01.jpg · photo changed") !== -1,
+        "photo list: one entry per matched photo with products + status, nothing chosen: " + labels.join(" | "));
+    box.value = "{ broken"; await box.fire("input");
+    ok(/^✗ Not a valid Capsule JSON:\n• not valid JSON/.test(pst()) && imp.disabled, "invalid paste → reason shown, Import disabled");
+    box.value = "```json\n" + COPIED + "\n```"; await box.fire("input");
+    ok(/^✓ Valid — box x 0\.067/.test(pst()) && /Note — the bounding box touches/.test(pst()) && /Choose the photo it was made from/.test(pst()) && imp.disabled,
+        "valid paste (fenced) → ✓ + notes, but Import disabled until a photo is chosen");
+    sel.value = P3; await sel.fire("change");
+    ok(!imp.disabled && !/Choose the photo/.test(pst()), "photo chosen → Import enabled");
+    await imp.fire("click");
     const s5 = readStore().items[P3.toLowerCase()];
-    ok(s5 && /^Pasted \d{4}-\d\d-\d\d \d\d:\d\d$/.test(s5.auto.sourceFile) && s5.pixelSize.width === 1080 && Math.abs(s5.auto.boundingBox.x - 0.067434) < 1e-6,
-        "Paste for A3 → stored for A3's photo, source 'Pasted <date time>', pixel size read");
-    ok(/✓ Capsule data pasted for A3\/hero\.jpg \(A3\) — ⋯ → Edit Subject Placement to check it, Regenerate \.indd to apply it\./.test(text("capsule-message")), "Paste message (A3 already generated): " + text("capsule-message").split("\n")[0]);
-    ok(/⚠ 1 photo changed since import/.test(text("capsule-summary")) && !/Missing Detection Data/.test(text("capsule-summary")), "summary after paste: " + text("capsule-summary"));
-    // ⋯ → Paste New Capsule JSON… on a photo with data: only that photo, replacement asked
-    pOpts = null;
-    pasteAnswers.push((opts) => { pOpts = opts; return { imagePath: P2, text: COPIED.replace("0.533717114", "0.5") }; });
-    answers.push(null); // Cancel at "Replace Capsule data?"
+    ok(s5 && /^Pasted \d{4}-\d\d-\d\d \d\d:\d\d$/.test(s5.auto.sourceFile) && s5.pixelSize.width === 1080 && Math.abs(s5.auto.boundingBox.x - 0.067434) < 1e-6 && fs.readFileSync(storeFile, "utf8") !== raw5,
+        "Import for This Photo → stored for A3's photo, source 'Pasted <date time>', pixel size read");
+    ok(/✓ Capsule data pasted for A3\/hero\.jpg \(A3\)/.test(text("capsule-message")), "message: " + text("capsule-message").split("\n")[0]);
+    ok(box.value === "" && sel.value === "" && imp.disabled && sel.children.some((o) => o.textContent === "A3 — A3/hero.jpg · has data"), "after import: box cleared, photo choice reset, list shows 'has data'");
+    // Paste Capsule JSON button: the clipboard into the box (UXP returns { "text/plain": … })
+    global.navigator = { clipboard: { readText: async () => ({ "text/plain": COPIED.replace("0.533717114", "0.5") }) } };
+    await nodes["btn-capsule-paste"].fire("click");
+    ok(box.value === COPIED.replace("0.533717114", "0.5") && /^✓ Valid/.test(pst()), "Paste Capsule JSON → clipboard text in the box, validated");
+    global.navigator = { clipboard: { readText: async () => { throw new Error("denied"); } } };
+    await nodes["btn-capsule-paste"].fire("click");
+    ok(/Couldn't read the clipboard — click in the box below and press ⌘V/.test(text("capsule-message")) && /^✓ Valid/.test(pst()), "clipboard unreadable → asks for ⌘V, the box is kept");
+    // ⋯ → Paste Capsule JSON (Step 3): selects that photo; replacing existing data asks first
+    answers.push({ pick: /Paste Capsule JSON \(Step 3\)/ });
+    await P.productActions(rowOf("Q5"));
+    ok(sel.value === P2 && /Paste the Capsule JSON into the box in step 3 — Q5\/car_02\.png \(Q5\) is selected/.test(text("gen-message")), "⋯ → Paste: Q5's photo selected in step 3");
     const raw6 = fs.readFileSync(storeFile, "utf8");
-    await P.pasteCapsuleJson(rowOf("Q5"));
-    ok(pOpts.locked && pOpts.selected === P2 && pOpts.photos.length === 1, "⋯ → Paste: only that product's photo");
-    ok(dialogs[dialogs.length - 1].title === "Replace Capsule data?" && fs.readFileSync(storeFile, "utf8") === raw6, "⋯ → Paste over existing data → asked first; Cancel → unchanged");
-    pasteAnswers.push({ imagePath: P2, text: COPIED.replace("0.533717114", "0.5") });
+    answers.push(null); // Cancel at "Replace Capsule data?"
+    await imp.fire("click");
+    ok(dialogs[dialogs.length - 1].title === "Replace Capsule data?" && fs.readFileSync(storeFile, "utf8") === raw6 && box.value !== "", "photo with data → asked first; Cancel → nothing stored, the box kept");
     answers.push({ pick: /^Replace$/ });
-    await P.pasteCapsuleJson(rowOf("Q5"));
-    ok(readStore().items[P2.toLowerCase()].auto.focalPoint.x === 0.5 && /✓ Capsule data pasted for Q5\/car_02\.png \(Q5\)/.test(text("gen-message")), "⋯ → Paste → Replace → stored, message in the product area");
+    await imp.fire("click");
+    ok(readStore().items[P2.toLowerCase()].auto.focalPoint.x === 0.5 && /✓ Capsule data pasted for Q5\/car_02\.png \(Q5\)/.test(text("capsule-message")), "Replace → stored for Q5");
 
     console.log(f ? `${f} FAILED` : "all passed");
     process.exit(f ? 1 : 0);

@@ -946,41 +946,40 @@ button.btn-primary:disabled {
     color: #bbb;
 }
 
-/* ---------- Paste Capsule JSON window (capsulepaste.js) ---------- */
+/* ---------- Paste Capsule JSON box (step 3) ---------- */
 
-.paste-photo-select {
-    flex: 1;
-    min-width: 0;
+.capsule-paste {
+    margin: 2px 0 6px;
 }
 
-.paste-photo-name {
-    font-size: 11px;
-    color: #ddd;
-}
-
-.paste-row {
+.capsule-paste-row {
     display: flex;
     flex-direction: row;
     align-items: center;
     margin: 2px 0 4px;
+    font-size: 11px;
 }
 
-.paste-row button {
-    margin: 0 6px 0 0;
+.paste-photo-select {
+    flex: 1;
+    min-width: 0;
+    margin-left: 6px;
+    font-size: 11px;
 }
 
 .paste-text {
     width: 100%;
-    height: 84px;
+    height: 64px;
     font-family: monospace;
     font-size: 11px;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
 }
 
 .paste-status {
     font-size: 11px;
     color: #bbb;
     margin-bottom: 2px;
+    white-space: pre-wrap;
 }
 
 .paste-status.paste-ok {

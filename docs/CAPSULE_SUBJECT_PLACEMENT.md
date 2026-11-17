@@ -52,11 +52,12 @@ Capsule replaces only **where the subject box comes from**: the backend API is s
 3. **Step 3:** set *Subject detection* to **Capsule JSON** (the default).
 4. **Step 4:** click **Match**.
 5. **Bring in the Capsule data**, pasted or as files:
-   - **Paste (copied from the workflow):** in the Capsule workflow, click **Copy** on the Preview node. In step 3, click **Paste Capsule JSON…**.
-     - A Capsule JSON already on the clipboard is filled in when the window opens. Otherwise press ⌘V in the text box, or click **Paste from Clipboard**.
-     - **Choose the photo** it was made from. The window starts on the first photo without data. The text is checked as it is pasted, and the box and focal point are drawn on that photo.
-     - **Import for This Photo** saves it, shown later as "Pasted <date time>". Pasted text has no file name, so the photo is never guessed: you choose it. From a product's ⋯ menu, **Paste Capsule JSON…** offers only that product's photo.
-     - Match runs first if it hasn't yet. Text with a ```` ```json ```` fence or extra blanks is accepted.
+   - **Paste (copied from the workflow):** in the Capsule workflow, click **Copy** on the Preview node. In step 3, click **Paste Capsule JSON**, which puts the clipboard into the box under it (or click in the box and press ⌘V).
+     - The text is checked as it is pasted: ✓ with the box and focal point values and any notes, or ✗ with every reason.
+     - **For photo:** choose the photo it was made from. Pasted text has no file name, so nothing is preselected and the photo is never guessed.
+     - Click **Import for This Photo**. The data is shown later as "Pasted <date time>". Check the box on the photo with **⋯ → Edit Subject Placement**.
+     - **⋯ → Paste Capsule JSON (Step 3)** selects that product's photo in the box.
+     - If you paste before Match, Match runs first so the photo list fills. Text with a ```` ```json ```` fence or extra blanks is accepted.
    - **Several files at once:** in step 3, click **Import JSON Files…**. Each file is paired with a matched photo by **file name only**:
      - `car_01.json`, `car_01.capsule.json` or `car_01_capsule.json` → `car_01.jpg`.
      - Files with no photo of that name, files whose name fits several photos, and several files for one photo are listed and **not** imported.
@@ -69,7 +70,7 @@ Capsule replaces only **where the subject box comes from**: the backend API is s
 
 Before Generate All or Regenerate, the plugin lists every product whose photo has no Capsule JSON, or whose photo file changed after the import. You can:
 
-- **Paste Capsule JSON…** or **Import Capsule JSON Files…**, or
+- **Import Capsule JSON Files…** (or close it and paste the JSON in step 3), or
 - **Continue with Default Placement.** These products are placed exactly as the original plugin places a photo without a subject box, and are marked **⚠ Review — Missing Detection Data**.
 
 The backend API is **never** called in Capsule mode.
@@ -137,7 +138,7 @@ This is unchanged from the original plugin (`placement.js` `PLACEMENT_CONFIG.sub
 
 | Test | What it covers |
 |---|---|
-| `node tools/tests/run.js` | All offline tests, including the original suite unchanged, plus:<br>• `capsulepaste.test.js`: pasted text validation, clipboard, photo choice, the paste window on a fake DOM<br>• `capsule.test.js`: JSON validation, adapter, store, bulk matching, a Capsule box giving identical placement plans to the same API box (48 cases)<br>• `capsulepreview.test.js`: Preview = `placeProductImage` (60 cases)<br>• `capsuleeditor.test.js`: coordinates, drag and resize, typed values, the window on a fake DOM<br>• `capsulepanel.test.js`: the real `index.js` on a fake UXP: import, Missing Detection Data, source switch, Apply / Regenerate warnings |
+| `node tools/tests/run.js` | All offline tests, including the original suite unchanged, plus:<br>• `capsulepaste.test.js`: pasted text validation and the clipboard (the paste box itself is in `capsulepanel.test.js`)<br>• `capsule.test.js`: JSON validation, adapter, store, bulk matching, a Capsule box giving identical placement plans to the same API box (48 cases)<br>• `capsulepreview.test.js`: Preview = `placeProductImage` (60 cases)<br>• `capsuleeditor.test.js`: coordinates, drag and resize, typed values, the window on a fake DOM<br>• `capsulepanel.test.js`: the real `index.js` on a fake UXP: import, Missing Detection Data, source switch, Apply / Regenerate warnings |
 | `node tools/tests/indesign/capsule-regression.js [git-ref]` | Needs a running InDesign. Runs the ORIGINAL plugin code (default `main`) and this working tree on the same synthetic files and subject boxes: Auto Placement and Custom Subject Frames must give identical pages, warnings, Image Extension analysis and preview export; Capsule mode with the same boxes must equal the original. Network blocked |
 | `node tools/tests/indesign/capsule-indesign.js` | Needs a running InDesign. Uses a synthetic Template Set (1200×1200, 800×600, 1080×1920, 1000×700 with a bleeding frame) and synthetic photos (1920×1280, 3000×2000, 1080×1350). It runs the plugin's own Generate, compares every placed graphic with Preview, checks the layout-only edit plus Regenerate, and exports preview JPGs. It only closes documents in its own test folder |
 
@@ -150,5 +151,5 @@ This is unchanged from the original plugin (`placement.js` `PLACEMENT_CONFIG.sub
 - **Preview geometry** is read from the *saved* product INDD. Unsaved changes in an open INDD are not included.
 - **Photo identity** is the file path plus its size and modification time. Moving or renaming a photo means importing its JSON again.
 - **Pairing:** Capsule's JSON carries no image identity. Bulk pairing relies on file names. Pasting and per-product import rely on your choice of photo or product.
-- **Clipboard:** reading it needs the manifest permission `"clipboard": "read"`. The plugin only reads it when the paste window opens, or when you click Paste from Clipboard. On open, it fills in only text that is a valid Capsule JSON.
+- **Clipboard:** reading it needs the manifest permission `"clipboard": "read"`. The plugin reads it only when you click **Paste Capsule JSON**.
 - **Dragging** in the editor uses UXP mouse / pointer events. The numeric fields are the fallback if dragging behaves differently in an InDesign version. The editor window has been tested offline on a fake DOM and has not yet been tried interactively in InDesign.
