@@ -158,6 +158,12 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     await P.init();
     ok(P.subjectSource() === "capsule", "default subject detection in this plugin: Capsule JSON");
     ok(!nodes["capsule-actions"].classList.contains("hidden") && nodes["src-capsule"].classList.contains("source-selected"), "step 3 shows the Capsule controls");
+    // Import before Match: the import matches first, then pairs the files
+    picks.push([ROOT + "/downloads/unrelated.json"]);
+    answers.push(null);
+    await P.importCapsuleFiles();
+    ok(P.rows().length === 4 && dialogs[dialogs.length - 1].title === "Import Capsule JSON" && /unrelated\.json — no matched photo/.test(dialogs[dialogs.length - 1].message),
+        "Import before Match → products matched automatically, then the files are paired");
     await nodes["btn-match"].fire("click");
     ok(/Capsule data: 0 of 3 photos · ⚠ 3 Missing Detection Data/.test(text("capsule-summary")), "after Match: " + text("capsule-summary"));
 

@@ -751,8 +751,30 @@ async function pickJsonFiles(multiple) {
 async function importCapsuleFiles() {
     if (!capsuleMod) { setCapsuleMessage("capsule.js failed to load — see the banner above."); return; }
     if (!outputEntry) { setCapsuleMessage("Select the output folder (step 1) first — Capsule data is saved there."); return; }
-    const photos = matchedPhotos();
-    if (!photos.length) { setCapsuleMessage("Run Match (step 4) first, so the plugin knows which photo each product uses."); return; }
+    let photos = matchedPhotos();
+    // Not matched yet: match first (same as the Match button), so the files
+    // can be paired with the products' photos.
+    if (!photos.length && excelEntry && photosEntry && matcher) {
+        setCapsuleMessage("Matching products to photos first…");
+        setBusy(true);
+        try {
+            manifestRows = await matcher.buildManifest(excelEntry, photosEntry);
+            await refreshProducts();
+        } catch (e) {
+            setCapsuleMessage("Match failed: " + errorText(e));
+            return;
+        } finally {
+            setBusy(false);
+        }
+        setCapsuleMessage("");
+        await refreshCapsuleSummary();
+        photos = matchedPhotos();
+    }
+    if (!photos.length) {
+        setCapsuleMessage(excelEntry && photosEntry ? "No product could be matched to a photo — check the Excel file and the photos folder (step 1)."
+            : "Select the Excel file and the photos folder (step 1) first, so the plugin knows which photo each product uses.");
+        return;
+    }
     let files;
     try { files = await pickJsonFiles(true); } catch (e) { setCapsuleMessage(errorText(e)); return; }
     if (!files.length) return;
