@@ -945,13 +945,16 @@ async function applyCapsuleEdit(rec, result, layouts) {
     const names = (rs) => rs.slice(0, 6).map((r) => r.headline).join(", ") + (rs.length > 6 ? ` …(+${rs.length - 6})` : "");
     const completed = existing.filter((r) => { const s = getStatus(products.get(r).inddPath); return !!(s && (s.committedAt || s.exportedAt)); });
     const extended = existing.filter((r) => hasExtensionResults(getStatus(products.get(r).inddPath)));
-    const open = existing.filter((r) => render.isInddOpen(products.get(r).inddPath));
+    if (!(await stopIfUnsaved(existing))) return;
+    const open = [];
+    for (const r of existing) if ((await render.inddOpenState(products.get(r).inddPath)).open) open.push(r);
     const lines = [`Subject change for ${photoLabel(rec.imagePath)} — ${result.action === "apply_layout" ? `layout ${layoutLabel} only` : "all layouts"}.`,
         `Products using this photo: ${names(affected)}.`];
     if (existing.length) lines.push("Regenerating will replace the current INDD and may discard manual edits.");
     if (completed.length) lines.push(`⚠ Completed artwork: ${names(completed)} ${completed.length === 1 ? "is" : "are"} Committed / Exported. Regenerating sends ${completed.length === 1 ? "it" : "them"} back for review — commit and export again. JPGs already exported are not deleted.`);
     if (extended.length) lines.push(`⚠ Image Extension results exist for ${names(extended)}. They were made for the old placement: the regenerated INDD starts without them — extend again (or check Use Existing Extension) before Commit.`);
-    if (open.length) lines.push(`Open in InDesign: ${names(open)} — closed without saving first.`);
+    if (open.length) lines.push(`Open in InDesign (no unsaved changes): ${names(open)} — closed first.`);
+    if (existing.length) lines.push("A copy of every INDD that is replaced is kept in InDesign/_backup/<date_time>/ in the output folder.");
     lines.push("The Template Set is not changed. Save Only keeps the INDDs as they are until the next Generate / Regenerate.");
     const answer = await showDialog("Apply subject change?", lines.join("\n\n"), [
         { label: existing.length ? "Save & Regenerate" : "Save & Generate", value: "go", danger: existing.length > 0 },
@@ -973,7 +976,16 @@ async function applyCapsuleEdit(rec, result, layouts) {
         renderTable();
         return;
     }
+    let backup = null;
     try {
+        backup = await render.backupIndds(existing.map((r) => products.get(r).inddPath), outputEntry.nativePath);
+    } catch (e) {
+        setMessage(`✓ Subject change saved, but NOT regenerated: the backup of the current INDD(s) failed (${errorText(e)}).`, channels.generate);
+        renderTable();
+        return;
+    }
+    try {
+        // closeIndd refuses an INDD that got unsaved changes since the check above.
         for (const r of open) await render.closeIndd(products.get(r).inddPath);
         const extendedPaths = extended.map((r) => products.get(r).inddPath.toLowerCase());
         const res = await runGenerate(affected, `Applying the subject change to ${affected.length} product(s)…`);
@@ -985,9 +997,10 @@ async function applyCapsuleEdit(rec, result, layouts) {
         renderTable();
         if (res.generated.length === 1) { try { await render.openIndd(res.generated[0].inddPath); } catch (e) {} }
         summarize(res.generated.length ? `✓ Subject change applied — regenerated ${res.generated.length} INDD(s)` +
-            (extended.length ? " · ⚠ re-check Image Extension" : "") : "✗ Regenerate failed", res, channels.generate);
+            (extended.length ? " · ⚠ re-check Image Extension" : "") : "✗ Regenerate failed", res, channels.generate,
+            backup && backup.copied.length ? `Previous INDD(s) backed up to ${backup.folder}` : "");
     } catch (e) {
-        setMessage(errorText(e), channels.generate);
+        setMessage(`✓ Subject change saved, but NOT regenerated: ${errorText(e)}`, channels.generate);
     }
 }
 
@@ -2215,17 +2228,36 @@ async function chooseSubjectRow(rec, forceDetect) {
         : `${rec.headline}: subject = ${names.join(" + ")} — Regenerate .indd (⋯) or Generate All to apply it.`, channels.generate);
 }
 
+// Product INDDs open in InDesign WITH unsaved changes are never closed or
+// replaced: names them and returns false (the designer saves or closes them
+// first). True when none of the rows' INDDs has unsaved changes.
+async function stopIfUnsaved(rows) {
+    const unsaved = [];
+    for (const r of rows) {
+        const p = products.get(r);
+        if (p && p.exists && (await render.inddOpenState(p.inddPath)).modified) unsaved.push(r);
+    }
+    if (!unsaved.length) return true;
+    await showDialog("Unsaved changes",
+        `${unsaved.map((r) => products.get(r).inddPath.split("/").pop()).join(", ")} ${unsaved.length === 1 ? "is" : "are"} open in InDesign with unsaved changes.\n\n` +
+        "Save (File → Save) or close " + (unsaved.length === 1 ? "it" : "them") + " yourself, then try again. Nothing was changed.", [], { closeLabel: "OK" });
+    setMessage(`Nothing regenerated: ${unsaved.map((r) => r.headline).join(", ")} ha${unsaved.length === 1 ? "s" : "ve"} unsaved changes in InDesign.`, channels.generate);
+    return false;
+}
+
 // Rebuilds ONE product's INDD, then opens it ("jumps" to it) in InDesign.
-// An INDD that's open is closed WITHOUT saving — only after the user
-// confirmed that manual edits will be discarded.
+// An INDD that's open is closed first — only after the user confirmed that
+// manual edits will be discarded, and never with unsaved changes: then
+// nothing happens until the designer saves or closes it.
 async function regenerateRow(rec) {
     const p = products.get(rec);
+    if (p.exists && !(await stopIfUnsaved([rec]))) return;
     if (!(await confirmCapsuleCoverage([rec]))) return;
-    const open = p.exists && render.isInddOpen(p.inddPath);
+    const open = p.exists && (await render.inddOpenState(p.inddPath)).open;
     if (p.exists) {
         const go = await showDialog("Regenerate .indd?",
             "Regenerating will replace the current INDD and may discard manual edits. Continue?" +
-            (open ? "\n\nThis INDD is open in InDesign — it will be closed without saving first." : ""),
+            (open ? "\n\nThis INDD is open in InDesign (no unsaved changes) — it will be closed first." : ""),
             [{ label: "Regenerate", value: "go", danger: true }]);
         if (go !== "go") return;
     }

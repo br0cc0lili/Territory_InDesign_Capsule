@@ -1974,7 +1974,7 @@ async function generateIndds(manifestRows, templatePaths, outputRootPath, onProg
             }
             // A product INDD the user has open (e.g. from a previous run)
             // can't be overwritten while open.
-            if (findOpenDocument(inddPath)) {
+            if (findOpenDocument(inddPath) || await findOpenDocumentAsync(inddPath)) {
                 fail(new Error("this INDD is open in InDesign — close it, then generate again"));
                 run.tick(`${headline} — ${inddName} (open)`);
                 continue;
@@ -2091,13 +2091,81 @@ function isInddOpen(path) {
     return !!findOpenDocument(path);
 }
 
-// Closes an open product INDD WITHOUT saving (Regenerate after the user
-// confirmed that manual edits will be discarded). No-op if it isn't open.
+// The open document saved at `path` (exact path), or null. In UXP,
+// document.fullName can be a Promise — awaited here, so the match works
+// where the synchronous findOpenDocument() can't see the path.
+async function findOpenDocumentAsync(path) {
+    const { app } = indesign();
+    try {
+        for (let i = 0; i < app.documents.length; i++) {
+            const doc = app.documents.item(i);
+            let p = "";
+            try {
+                let f = doc.fullName;
+                if (f && typeof f.then === "function") f = await f;
+                p = String(typeof f === "string" ? f : (f && (f.nativePath || f.fsName)) || "").replace(/^file:(\/\/)?/, "");
+            } catch (e) {}
+            if (p && samePath(p, path)) return doc;
+        }
+    } catch (e) {}
+    return null;
+}
+
+// { open, modified } of the product INDD at `path` — modified = it is open
+// in InDesign with unsaved changes. Conservative: if it can't be read, or an
+// open document has the same file name but its path can't be confirmed, it
+// counts as open WITH unsaved changes (the caller then stops).
+async function inddOpenState(path) {
+    const doc = await findOpenDocumentAsync(path);
+    if (!doc) {
+        const { app } = indesign();
+        try {
+            for (let i = 0; i < app.documents.length; i++) {
+                if (String(app.documents.item(i).name || "").toLowerCase() === basename(path).toLowerCase()) return { open: true, modified: true, uncertain: true };
+            }
+        } catch (e) {}
+        return { open: false, modified: false };
+    }
+    let modified = true;
+    try { modified = !!doc.modified; } catch (e) {}
+    return { open: true, modified };
+}
+
+// Closes an open product INDD before Regenerate replaces it (after the user
+// confirmed). Only that one document (exact path); no-op if it isn't open.
+// NEVER discards unsaved work: an INDD with unsaved changes is left open and
+// this throws — the designer saves or closes it first.
 async function closeIndd(path) {
-    const doc = findOpenDocument(path);
+    const doc = (await findOpenDocumentAsync(path)) || findOpenDocument(path);
     if (!doc) return;
+    let modified = true;
+    try { modified = !!doc.modified; } catch (e) {}
+    if (modified) {
+        throw new Error(`${basename(path)} has unsaved changes in InDesign — save it or close it yourself, then try again (nothing was changed)`);
+    }
     closeWithoutSaving(doc);
     await settle(250);
+}
+
+// Copies product INDDs that exist on disk to
+// <output>/InDesign/_backup/<YYYY-MM-DD_HHMMSS>/ before they are replaced
+// (Capsule subject change). Returns { folder, copied: [paths] }; throws if a
+// copy fails, so nothing is replaced without its backup.
+async function backupIndds(paths, outputRootPath, now) {
+    const lfs = require("uxp").storage.localFileSystem;
+    const d = now || new Date();
+    const p2 = (n) => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    const existing = [];
+    for (const p of paths || []) if (await pathExists(p)) existing.push(p);
+    if (!existing.length) return { folder: "", copied: [] };
+    const folder = await ensureFolders(outputRootPath, ["InDesign", "_backup", stamp]);
+    const target = await lfs.getEntryWithUrl("file:" + folder);
+    for (const p of existing) {
+        const entry = await lfs.getEntryWithUrl("file:" + p);
+        await entry.copyTo(target, { overwrite: true });
+    }
+    return { folder, copied: existing };
 }
 
 // Path of InDesign's active (front) document, or "" — lets the panel show
@@ -2978,7 +3046,7 @@ async function writeLog(logLines, logPath) {
 
 module.exports = {
     checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
-    isInddOpen, closeIndd, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
+    isInddOpen, inddOpenState, closeIndd, backupIndds, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
     addDefaultSubjectFrames, templateState, saveTemplate, textAvoidBounds,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
     pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, linesFromStarts, fitHeadlineToFrame,

@@ -93,7 +93,8 @@ Both Apply buttons first ask, listing what is affected:
 - **Manual edits:** the existing warning that regenerating replaces the INDD and may discard manual edits.
 - **Completed artwork:** Committed or Exported products go back to review. JPGs already exported are not deleted.
 - **Image Extension:** existing results were made for the old placement. After regenerating, the product is marked Review until you extend again (or check *Use Existing Extension*).
-- **Open files:** INDDs open in InDesign are closed without saving.
+- **Open files:** an INDD open in InDesign **with unsaved changes** stops the whole action: nothing is saved or replaced until you save or close it yourself. An open INDD without unsaved changes is closed first.
+- **Backup:** every INDD that will be replaced is first copied to `InDesign/_backup/<date_time>/` in the output folder. If the copy fails, nothing is regenerated.
 
 Then:
 

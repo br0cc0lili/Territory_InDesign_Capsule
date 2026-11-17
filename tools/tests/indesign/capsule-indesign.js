@@ -188,7 +188,7 @@ try {
                 pages.push({ pageBounds: r2(page.bounds), frame: r2(frame.geometricBounds), graphic: gr ? r2(gr.geometricBounds) : null, link, label,
                     ppi: gr ? Array.from(gr.actualPpi || [], Number) : null });
             }
-        } finally { d.close(id.SaveOptions.NO); }
+        } finally { d.close(id.SaveOptions.NO); await new Promise((r) => setTimeout(r, 500)); } // settle, like render.js after a close
         return pages;
     }
     out.products = {};
@@ -221,6 +221,26 @@ try {
     const exp = await render.exportFromIndds(gen.generated.map((g) => ({ rec: g.rec, subType: g.subType, inddPath: g.inddPath })), ROOT + "/out", null, { preview: true });
     out.export = exp.items.map((o) => ({ inddPath: o.inddPath, error: o.error || "", warnings: o.warnings, folder: o.folder || "", files: o.files || null }));
     step("export");
+    // --- open INDD WITH unsaved changes: never closed / replaced / altered
+    {
+        const A6path = gen2.generated[0].inddPath;
+        const d = app.open(A6path, true);
+        d.viewPreferences.horizontalMeasurementUnits = id.MeasurementUnits.MILLIMETERS;
+        const marker = d.pages.item(0).rectangles.add({ geometricBounds: [10, 10, 20, 20], name: "unsaved-marker" });
+        const st = await render.inddOpenState(A6path);
+        let closeErr = "";
+        try { await render.closeIndd(A6path); } catch (e) { closeErr = String(e.message || e); }
+        const geo = await render.readPlacementGeometry(A6path, TPL);
+        const genOpen = await render.generateIndds([rows[0]], [TPL], ROOT + "/out", null, { placementMode: "auto", subjectSource: "capsule" });
+        const backup = await render.backupIndds([A6path], ROOT + "/out");
+        const still = await render.inddOpenState(A6path);
+        let markerAlive = false; try { markerAlive = d.isValid && items(d.pages.item(0).rectangles).some((r) => String(r.name) === "unsaved-marker"); } catch (e) {}
+        out.unsaved = { state: st, closeErr, geometrySource: geo.source, geometryPages: geo.pages.length, stillOpen: still.open, stillModified: still.modified, markerAlive,
+            unitsKept: String(d.viewPreferences.horizontalMeasurementUnits) === "MILLIMETERS",
+            generateFailed: genOpen.failed.map((x) => x.error), generated: genOpen.generated.length, backup };
+        d.close(id.SaveOptions.NO); // our own disposable test document
+    }
+    step("unsaved");
     out.docsAtEnd = app.documents.length;
 } catch (e) {
     out.error = String(e && e.stack || e);
@@ -281,6 +301,12 @@ ok(R.export.length === 3 && R.export.every((e) => !e.error), "Preview export fro
 const jpgs = [];
 (function walk(d) { for (const f of fs.readdirSync(d)) { const p = d + "/" + f; if (fs.statSync(p).isDirectory()) walk(p); else if (/\.jpe?g$/i.test(f)) jpgs.push(p); } })(ROOT + "/out");
 ok(jpgs.length >= 12, `preview JPGs written: ${jpgs.length} (3 products × 4 layouts)`);
+const U = R.unsaved;
+ok(U.state.open && U.state.modified, "open INDD with unsaved changes detected (inddOpenState)");
+ok(/has unsaved changes/.test(U.closeErr) && U.stillOpen && U.stillModified && U.markerAlive, "closeIndd refuses it — still open, still unsaved, the unsaved edit is intact");
+ok(U.geometryPages === 4 && U.unitsKept, "Preview geometry read while it is open: the open document is untouched (units kept, not closed)");
+ok(U.generated === 0 && U.generateFailed.some((e) => /open in InDesign — close it/.test(e)) && U.stillModified && U.markerAlive, "Generate refuses to replace the open INDD, unsaved edit intact: " + U.generateFailed[0]);
+ok(U.backup.copied.length === 1 && fs.existsSync(U.backup.folder + "/" + path.basename(U.backup.copied[0])), "backupIndds copied the INDD to " + U.backup.folder.replace(ROOT, "…"));
 ok(R.docsAtEnd === R.docsBefore, `no test documents left open (${R.docsAtEnd})`);
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);

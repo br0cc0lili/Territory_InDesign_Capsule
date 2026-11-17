@@ -61,7 +61,8 @@ const realRender = require(PLUGIN + "/js/render.js");
 const capsule = require(PLUGIN + "/js/capsule.js");
 
 // ---------- stubbed render.js (no InDesign) ----------
-const calls = { generate: [], closed: [], opened: [] };
+const calls = { generate: [], closed: [], opened: [], backups: [] };
+const unsavedPath = { value: "" }; // a product INDD "open with unsaved changes" in the fake InDesign
 const ROWS = [
     { headline: "A6 Avant", imagePath: P1, status: "matched" },
     { headline: "Q5", imagePath: P2, status: "matched" },
@@ -84,8 +85,10 @@ const render = {
             failed: [], logLines: [], failures: [], imageChecks: [], templates: [] };
     },
     writeLog: async () => {},
-    isInddOpen: (p) => p === inddOf("A6 Avant"),
-    closeIndd: async (p) => { calls.closed.push(p); },
+    isInddOpen: (p) => p === inddOf("A6 Avant") || p === unsavedPath.value,
+    inddOpenState: (p) => ({ open: p === inddOf("A6 Avant") || p === unsavedPath.value, modified: p === unsavedPath.value }),
+    closeIndd: async (p) => { if (p === unsavedPath.value) throw new Error("unsaved"); calls.closed.push(p); },
+    backupIndds: async (paths) => { calls.backups.push(paths.slice()); return { folder: OUT + "/InDesign/_backup/x", copied: paths.filter((x) => fs.existsSync(x)) }; },
     openIndd: async (p) => { calls.opened.push(p); return "x"; },
     activeDocumentPath: () => "",
     typeOfTemplate: () => "service", typeFolder: () => "Service", templateState: () => ({ open: false, modified: false }),
@@ -246,7 +249,8 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     ok(ap.title === "Apply subject change?" && /Regenerating will replace the current INDD and may discard manual edits/.test(ap.message), "Apply: the existing Regenerate warning");
     ok(/Completed artwork: A6 Avant/.test(ap.message) && /JPGs already exported are not deleted/.test(ap.message), "Apply: Committed / Exported artwork flagged");
     ok(/Image Extension results exist for A6 Avant/.test(ap.message) && /extend again/.test(ap.message), "Apply: existing Image Extension results flagged");
-    ok(/Open in InDesign: A6 Avant — closed without saving first/.test(ap.message) && /Template Set is not changed/.test(ap.message), "Apply: open INDD + templates preserved stated");
+    ok(/Open in InDesign \(no unsaved changes\): A6 Avant — closed first/.test(ap.message) && /Template Set is not changed/.test(ap.message), "Apply: open (saved) INDD + templates preserved stated");
+    ok(/_backup/.test(ap.message) && calls.backups.length === 1 && calls.backups[0].join() === A6, "Apply: the INDD is backed up before it is replaced");
     ok(calls.generate.length === gBefore + 1 && calls.generate[gBefore].rows.join() === "A6 Avant" && calls.generate[gBefore].options.subjectSource === "capsule", "Save & Regenerate → only the products using this photo");
     ok(calls.closed.indexOf(A6) !== -1, "the open INDD was closed (without saving) before regenerating");
     const st = readStore().items[P1.toLowerCase()];
@@ -282,6 +286,20 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     const ri = dialogs[dialogs.length - 1];
     const st3 = readStore().items[P1.toLowerCase()];
     ok(ri.title === "Replace Capsule data?" && /You adjusted/.test(ri.message) && st3.manual === null && Object.keys(st3.layouts).length === 0, "re-import over edits → asked; Discard → imported values only");
+
+    // an INDD open WITH unsaved changes: Apply and ⋯ → Regenerate stop, nothing saved / closed / generated
+    unsavedPath.value = A6;
+    editorAnswers.push(() => ({ action: "apply_all", layoutId: "", values: { boundingBox: { x: 0.3, y: 0.3, width: 0.3, height: 0.3 }, focalPoint: edited.focalPoint } }));
+    const raw2 = fs.readFileSync(storeFile, "utf8"), g4 = calls.generate.length, c4 = calls.closed.length, b4 = calls.backups.length;
+    await P.editSubjectRow(rowOf("A6 Avant"));
+    const us = dialogs[dialogs.length - 1];
+    ok(us.title === "Unsaved changes" && /A6 Avant\.indd is open in InDesign with unsaved changes/.test(us.message) && us.buttons.length === 0,
+        "Apply with unsaved changes in the open INDD → 'Unsaved changes' message only");
+    ok(fs.readFileSync(storeFile, "utf8") === raw2 && calls.generate.length === g4 && calls.closed.length === c4 && calls.backups.length === b4,
+        "… nothing saved, closed, backed up or regenerated");
+    await P.regenerateRow(rowOf("A6 Avant"));
+    ok(dialogs[dialogs.length - 1].title === "Unsaved changes" && calls.generate.length === g4 && calls.closed.length === c4, "⋯ → Regenerate .indd with unsaved changes → stops, nothing closed");
+    unsavedPath.value = "";
 
     // changed photo → stale → Missing Detection Data again until confirmed
     fs.writeFileSync(P1, Buffer.concat([jpeg(6000, 4000), Buffer.from([0, 0, 0])]));
