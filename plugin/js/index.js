@@ -31,9 +31,10 @@ try { datamerge = require("./js/datamerge.js"); } catch (e) { loadErrors.push("d
 try { subjectMod = require("./js/subject.js"); } catch (e) { loadErrors.push("subject.js: " + e); }
 try { pickerMod = require("./js/subjectpicker.js"); } catch (e) { loadErrors.push("subjectpicker.js: " + e); }
 // Capsule subject source: imported Adobe Capsule JSON + its editor window.
-let capsuleMod = null, capsuleEditor = null;
+let capsuleMod = null, capsuleEditor = null, capsulePaste = null;
 try { capsuleMod = require("./js/capsule.js"); } catch (e) { loadErrors.push("capsule.js: " + e); }
 try { capsuleEditor = require("./js/capsuleeditor.js"); } catch (e) { loadErrors.push("capsuleeditor.js: " + e); }
+try { capsulePaste = require("./js/capsulepaste.js"); } catch (e) { loadErrors.push("capsulepaste.js: " + e); }
 // Optional Auto Text Color palette reader — if it can't load, the palette row just stays empty.
 let colorpalette = null;
 try { colorpalette = require("./js/colorpalette.js"); } catch (e) { loadErrors.push("colorpalette.js: " + e); }
@@ -98,6 +99,7 @@ const el = {
     srcApi: document.getElementById("src-api"),
     capsuleActions: document.getElementById("capsule-actions"),
     btnCapsuleImport: document.getElementById("btn-capsule-import"),
+    btnCapsulePaste: document.getElementById("btn-capsule-paste"),
     capsuleSummary: document.getElementById("capsule-summary"),
     capsuleMessage: document.getElementById("capsule-message"),
     activeActions: document.getElementById("active-actions"),
@@ -287,6 +289,7 @@ function updateButtons() {
     el.btnExport.disabled = busy || !outputEntry || committedRows().length === 0;
     el.btnDmPrepare.disabled = busy || !excelEntry;
     if (el.btnCapsuleImport) el.btnCapsuleImport.disabled = busy || !outputEntry;
+    if (el.btnCapsulePaste) el.btnCapsulePaste.disabled = busy || !outputEntry;
 }
 
 function setBusy(on) {
@@ -706,6 +709,7 @@ if (el.srcCapsule) {
     el.srcCapsule.addEventListener("click", () => setSubjectSource("capsule"));
     el.srcApi.addEventListener("click", () => setSubjectSource("api"));
     el.btnCapsuleImport.addEventListener("click", () => importCapsuleFiles());
+    if (el.btnCapsulePaste) el.btnCapsulePaste.addEventListener("click", () => pasteCapsuleJson(null));
 }
 
 // Before Generate / Regenerate in Capsule mode: photos without valid
@@ -732,9 +736,11 @@ async function confirmCapsuleCoverage(rows) {
     if (stale.length) lines.push(`${stale.length} photo${stale.length === 1 ? "" : "s"} changed after the Capsule JSON was imported:\n${list(stale)}`);
     lines.push("\nYou can continue with the original plugin's default placement (no subject box). These products are marked Review — Missing Detection Data. The backend API is not used.");
     const answer = await showDialog("Missing Detection Data", lines.join("\n\n"), [
+        { label: "Paste Capsule JSON…", value: "paste" },
         { label: "Import Capsule JSON Files…", value: "import" },
         { label: "Continue with Default Placement", value: "go", danger: true },
     ]);
+    if (answer === "paste") { await pasteCapsuleJson(null); return false; }
     if (answer === "import") { await importCapsuleFiles(); return false; }
     return answer === "go";
 }
@@ -745,15 +751,10 @@ async function pickJsonFiles(multiple) {
     return Array.isArray(picked) ? picked : (typeof picked.length === "number" && !picked.nativePath ? Array.from(picked) : [picked]);
 }
 
-// Step 3 → Import Capsule JSON Files…: several JSONs at once, each paired
-// with a matched photo by FILE NAME only (car_01.json → car_01.jpg). Nothing
-// ambiguous, unmatched or duplicated is imported; the pairing is confirmed first.
-async function importCapsuleFiles() {
-    if (!capsuleMod) { setCapsuleMessage("capsule.js failed to load — see the banner above."); return; }
-    if (!outputEntry) { setCapsuleMessage("Select the output folder (step 1) first — Capsule data is saved there."); return; }
+// The matched photos; when Match hasn't run yet, matches first (same as the
+// Match button). null (with a message in step 3) when there are none.
+async function ensureMatchedPhotos() {
     let photos = matchedPhotos();
-    // Not matched yet: match first (same as the Match button), so the files
-    // can be paired with the products' photos.
     if (!photos.length && excelEntry && photosEntry && matcher) {
         setCapsuleMessage("Matching products to photos first…");
         setBusy(true);
@@ -762,7 +763,7 @@ async function importCapsuleFiles() {
             await refreshProducts();
         } catch (e) {
             setCapsuleMessage("Match failed: " + errorText(e));
-            return;
+            return null;
         } finally {
             setBusy(false);
         }
@@ -773,8 +774,19 @@ async function importCapsuleFiles() {
     if (!photos.length) {
         setCapsuleMessage(excelEntry && photosEntry ? "No product could be matched to a photo — check the Excel file and the photos folder (step 1)."
             : "Select the Excel file and the photos folder (step 1) first, so the plugin knows which photo each product uses.");
-        return;
+        return null;
     }
+    return photos;
+}
+
+// Step 3 → Import JSON Files…: several JSONs at once, each paired
+// with a matched photo by FILE NAME only (car_01.json → car_01.jpg). Nothing
+// ambiguous, unmatched or duplicated is imported; the pairing is confirmed first.
+async function importCapsuleFiles() {
+    if (!capsuleMod) { setCapsuleMessage("capsule.js failed to load — see the banner above."); return; }
+    if (!outputEntry) { setCapsuleMessage("Select the output folder (step 1) first — Capsule data is saved there."); return; }
+    const photos = await ensureMatchedPhotos();
+    if (!photos) return;
     let files;
     try { files = await pickJsonFiles(true); } catch (e) { setCapsuleMessage(errorText(e)); return; }
     if (!files.length) return;
@@ -787,7 +799,7 @@ async function importCapsuleFiles() {
         m.matched.slice(0, 10).map((x) => `• ${name(x.json)} → ${photoLabel(x.photo)}`).join("\n") + (m.matched.length > 10 ? `\n…and ${m.matched.length - 10} more` : ""));
     const skipped = [];
     for (const j of m.unmatched) skipped.push(`• ${name(j)} — no matched photo with that name`);
-    for (const a of m.ambiguous) skipped.push(`• ${name(a.json)} — ${a.photos.length} photos have that name (use ⋯ → Import Capsule JSON per product)`);
+    for (const a of m.ambiguous) skipped.push(`• ${name(a.json)} — ${a.photos.length} photos have that name (use ⋯ → Paste / Import Capsule JSON per product)`);
     for (const d of m.duplicates) skipped.push(`• ${d.jsons.map(name).join(" + ")} — several files for ${photoLabel(d.photo)}`);
     if (skipped.length) lines.push("Not imported:\n" + skipped.join("\n"));
     if (!m.matched.length) {
@@ -825,7 +837,80 @@ async function importCapsuleFiles() {
     renderTable();
 }
 
-// ⋯ → Import Capsule JSON…: one JSON for THIS product's photo. A file named
+// Before new Capsule data replaces a photo's data: true = keep the
+// designer's adjustments, false = discard them, null = Cancel.
+async function confirmReplaceCapsule(imagePath) {
+    const old = capsuleStore && capsuleStore.items[capsuleMod.storeKey(imagePath)];
+    if (!old) return true;
+    const edited = capsuleMod.entryStatus(old, null) === "manual";
+    const answer = await showDialog("Replace Capsule data?",
+        `${photoLabel(imagePath)} already has Capsule data (from ${old.auto.sourceFile || "an earlier import"}).` +
+        (edited ? "\n\nYou adjusted the box or focal point for this photo." : ""),
+        edited ? [{ label: "Replace — Keep My Adjustments", value: "keep" }, { label: "Replace — Discard My Adjustments", value: "drop", danger: true }]
+            : [{ label: "Replace", value: "keep" }]);
+    if (answer !== "keep" && answer !== "drop") return null;
+    return answer === "keep";
+}
+
+// Step 3 → Paste Capsule JSON… (rec = null) or ⋯ → Paste Capsule JSON…
+// (rec = that product): the JSON copied from the Capsule workflow's Preview.
+// Pasted text has no file name, so the designer picks the photo — the box is
+// shown on it before anything is saved.
+async function pasteCapsuleJson(rec) {
+    const say = (text) => (rec ? setMessage(text, channels.generate) : setCapsuleMessage(text));
+    if (!capsuleMod || !capsulePaste) { say("capsule.js / capsulepaste.js failed to load — see the banner above."); return; }
+    if (!outputEntry) { say("Select the output folder (step 1) first — Capsule data is saved there."); return; }
+    const paths = rec ? [rec.imagePath] : await ensureMatchedPhotos();
+    if (!paths || !paths.length || !paths[0]) return;
+    await loadCapsule();
+    if (capsuleStore && capsuleStore.error) { say("⚠ " + capsuleStore.error + " — nothing imported."); return; }
+    const st = await capsuleStatuses(rec ? [rec] : manifestRows);
+    const seen = new Set();
+    const photos = [];
+    for (const path of paths) {
+        const key = capsuleMod.storeKey(path);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const users = manifestRows.filter((r) => r.status === "matched" && r.imagePath && capsuleMod.storeKey(r.imagePath) === key);
+        const status = st.get(key) || "missing";
+        const entry = capsuleStore && capsuleStore.items[key];
+        const names = (rec ? [rec] : users).map((r) => r.headline).filter(Boolean);
+        photos.push({
+            imagePath: path,
+            status,
+            pixelSize: entry && entry.pixelSize ? entry.pixelSize : null,
+            label: (names.length ? names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2}` : "") + " — " : "") + photoLabel(path) +
+                (status === "missing" ? "  ·  no data" : status === "stale" ? "  ·  photo changed" : "  ·  has data"),
+        });
+    }
+    const picked = await capsulePaste.showCapsulePaste({
+        photos, selected: rec ? rec.imagePath : "", locked: !!rec,
+        parse: capsuleMod.parseCapsuleJson, clean: capsuleMod.cleanPastedText,
+    });
+    if (!picked) return;
+    const keep = await confirmReplaceCapsule(picked.imagePath);
+    if (keep === null) return;
+    const r = await capsuleMod.importText(capsuleStore, picked.imagePath, picked.text, capsuleMod.pastedLabel(), keep);
+    if (!r.ok) {
+        await loadCapsule(); // drop the unsaved in-memory change
+        say("✗ The pasted JSON was not imported:\n• " + r.errors.join("\n• "));
+        return;
+    }
+    try { await capsuleMod.saveCapsuleStore(capsuleStore); } catch (e) {
+        say("Couldn't save the Capsule data: " + errorText(e));
+        await loadCapsule();
+        return;
+    }
+    const users = manifestRows.filter((x) => x.status === "matched" && x.imagePath && capsuleMod.storeKey(x.imagePath) === capsuleMod.storeKey(picked.imagePath));
+    const anyIndd = users.some((x) => { const p = products.get(x); return p && p.exists; });
+    say([`✓ Capsule data pasted for ${photoLabel(picked.imagePath)}` + (users.length ? ` (${users.map((x) => x.headline).join(", ")})` : "") +
+        (anyIndd ? " — ⋯ → Edit Subject Placement to check it, Regenerate .indd to apply it." : " — applied on Generate.")]
+        .concat(r.warnings.map((w) => "Note — " + w)).join("\n"));
+    await refreshCapsuleSummary();
+    renderTable();
+}
+
+// ⋯ → Import Capsule JSON File…: one JSON for THIS product's photo. A file named
 // differently from the photo is only used after an explicit confirmation.
 async function importCapsuleForRow(rec) {
     if (!capsuleMod) { setMessage("capsule.js failed to load — see the banner above.", channels.generate); return; }
@@ -844,18 +929,8 @@ async function importCapsuleForRow(rec) {
     }
     await loadCapsule();
     if (capsuleStore && capsuleStore.error) { setMessage("⚠ " + capsuleStore.error + " — nothing imported.", channels.generate); return; }
-    const old = capsuleEntryFor(rec);
-    let keep = true;
-    if (old) {
-        const edited = capsuleMod.entryStatus(old, null) === "manual";
-        const answer = await showDialog("Replace Capsule data?",
-            `${photoLabel(rec.imagePath)} already has Capsule data (from ${old.auto.sourceFile || "an earlier import"}).` +
-            (edited ? "\n\nYou adjusted the box or focal point for this photo." : ""),
-            edited ? [{ label: "Replace — Keep My Adjustments", value: "keep" }, { label: "Replace — Discard My Adjustments", value: "drop", danger: true }]
-                : [{ label: "Replace", value: "keep" }]);
-        if (answer !== "keep" && answer !== "drop") return;
-        keep = answer === "keep";
-    }
+    const keep = await confirmReplaceCapsule(rec.imagePath);
+    if (keep === null) return;
     const r = await capsuleMod.importFile(capsuleStore, rec.imagePath, jsonPath, keep);
     if (!r.ok) {
         await loadCapsule(); // drop the unsaved in-memory change
@@ -906,7 +981,7 @@ async function editSubjectRow(rec) {
     await loadCapsule();
     const entry = capsuleEntryFor(rec);
     const status = capsuleMod.entryStatus(entry, entry ? await capsuleMod.photoFingerprint(rec.imagePath) : null);
-    if (status === "missing") { setMessage(`${rec.headline}: import the Capsule JSON first (⋯ → Import Capsule JSON…).`, channels.generate); return; }
+    if (status === "missing") { setMessage(`${rec.headline}: paste or import the Capsule JSON first (⋯ → Paste Capsule JSON…).`, channels.generate); return; }
     if (status === "stale") {
         const a = await showDialog("Photo changed", `${photoLabel(rec.imagePath)} changed after its Capsule JSON was imported.`,
             [{ label: "Import New JSON…", value: "import" }, { label: "Keep Data for the Changed Photo…", value: "keep" }]);
@@ -2119,13 +2194,14 @@ async function productActions(rec) {
         const entry = capsuleEntryFor(rec);
         const cst = capsuleMod.entryStatus(entry, entry ? await capsuleMod.photoFingerprint(rec.imagePath) : null);
         const text = {
-            missing: ["detail-warning", "Capsule ⚠ Missing Detection Data — import the JSON"],
+            missing: ["detail-warning", "Capsule ⚠ Missing Detection Data — paste or import the JSON"],
             stale: ["detail-warning", "Capsule ⚠ The photo changed after the import"],
             auto: ["detail-muted", `Capsule ✓ ${entry && entry.auto.sourceFile ? entry.auto.sourceFile : "imported"}`],
             manual: ["detail-muted", `Capsule ✓ ${entry && entry.auto.sourceFile ? entry.auto.sourceFile : "imported"} · adjusted`],
         }[cst];
         subjectGroup.push({ header: "Subject (Capsule)" }, { status: [text] },
-            { label: cst === "missing" ? "Import Capsule JSON…" : "Re-import Capsule JSON…", value: "capsule_import" });
+            { label: cst === "missing" ? "Paste Capsule JSON…" : "Paste New Capsule JSON…", value: "capsule_paste" },
+            { label: cst === "missing" ? "Import Capsule JSON File…" : "Re-import Capsule JSON File…", value: "capsule_import" });
         if (cst === "auto" || cst === "manual") subjectGroup.push({ label: "Edit Subject Placement…", value: "capsule_edit" });
         if (cst === "stale") subjectGroup.push({ label: "Keep Capsule Data for Changed Photo…", value: "capsule_keep" });
     }
@@ -2156,6 +2232,7 @@ async function productActions(rec) {
     const answer = await showDialog(rec.headline, "", entries, { withText: true, closeLabel: stored ? "Close" : "Cancel" });
     const choice = answer.value;
     if (choice === "choose_subject") await chooseSubjectRow(rec);
+    if (choice === "capsule_paste") await pasteCapsuleJson(rec);
     if (choice === "capsule_import") await importCapsuleForRow(rec);
     if (choice === "capsule_edit") await editSubjectRow(rec);
     if (choice === "capsule_keep") await acceptChangedPhotoRow(rec);

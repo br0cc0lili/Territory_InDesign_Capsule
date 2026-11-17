@@ -921,6 +921,76 @@ button.source-selected {
     display: none;
 }
 
+.capsule-buttons {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    margin: 6px 0 2px;
+}
+
+.capsule-buttons button {
+    margin: 0 6px 4px 0;
+}
+
+/* The main action (Paste Capsule JSON, Import for This Photo). */
+button.btn-primary {
+    background: #e8e8e8;
+    border-color: #e8e8e8;
+    color: #1e1e1e;
+}
+
+button.btn-primary:disabled {
+    background: #5a5a5a;
+    border-color: #5a5a5a;
+    color: #bbb;
+}
+
+/* ---------- Paste Capsule JSON window (capsulepaste.js) ---------- */
+
+.paste-photo-select {
+    flex: 1;
+    min-width: 0;
+}
+
+.paste-photo-name {
+    font-size: 11px;
+    color: #ddd;
+}
+
+.paste-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin: 2px 0 4px;
+}
+
+.paste-row button {
+    margin: 0 6px 0 0;
+}
+
+.paste-text {
+    width: 100%;
+    height: 84px;
+    font-family: monospace;
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.paste-status {
+    font-size: 11px;
+    color: #bbb;
+    margin-bottom: 2px;
+}
+
+.paste-status.paste-ok {
+    color: #7fd88b;
+}
+
+.paste-status.paste-bad {
+    color: #ff8a8a;
+}
+
 /* ---------- Edit Subject Placement window (capsuleeditor.js) ---------- */
 
 .capsule-stage {

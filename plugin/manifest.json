@@ -23,6 +23,7 @@
     ],
     "requiredPermissions": {
         "localFileSystem": "fullAccess",
+        "clipboard": "read",
         "launchProcess": {
             "schemes": ["file"],
             "extensions": [".jpg", ""]

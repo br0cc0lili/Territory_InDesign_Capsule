@@ -103,7 +103,7 @@ A `⚠` next to a page explains what's missing, e.g. a layer or frame. Fix it in
 
 **Subject detection** — where the plugin learns where the car is in each photo:
 
-- **Capsule JSON** (default) — run **Detect Focal Point** in Adobe Capsule for each original photo and download the JSON. Name it like the photo (`car_01.jpg` → `car_01.json`) and click **Import Capsule JSON Files…**, or import one file per product with **⋯ → Import Capsule JSON…**. Check or adjust the box and focal point with **⋯ → Edit Subject Placement…**. A product without a JSON is reported as **Missing Detection Data** before generating; you can import it or continue with the default placement (the product is then marked ⚠ Review). See [Capsule Subject Placement](CAPSULE_SUBJECT_PLACEMENT.md).
+- **Capsule JSON** (default): run **Detect Focal Point** in Adobe Capsule for each original photo. Click **Copy** on the workflow's Preview node, then **Paste Capsule JSON…** in the panel, and choose the photo it belongs to. Its box is drawn on the photo before you import it. Or download the JSON files, name them like the photos (`car_01.jpg` → `car_01.json`) and click **Import JSON Files…**. Per product, use **⋯ → Paste Capsule JSON…** or **⋯ → Import Capsule JSON File…**. Check or adjust the box and focal point with **⋯ → Edit Subject Placement…**. A product without a JSON is reported as **Missing Detection Data** before generating; you can import it or continue with the default placement (the product is then marked ⚠ Review). See [Capsule Subject Placement](CAPSULE_SUBJECT_PLACEMENT.md).
 - **Backend API** — the original automatic detection through the team backend.
 
 The placement itself is the same with both. Then pick one of two options:
@@ -166,7 +166,7 @@ The most common warnings:
 
 - **"doesn't fit its frame"**: the text is too long and part of it would be cut off. Shorten the text or enlarge the frame in the product's file.
 - **"MainImage frame is empty"**: the photo is missing on that page. Place it again, or regenerate the product.
-- **"Missing Detection Data"** (Capsule JSON mode): no Capsule JSON was imported for the photo, or the photo changed after the import. The product was placed the default way. Import the JSON (**⋯ → Import Capsule JSON…**) and regenerate.
+- **"Missing Detection Data"** (Capsule JSON mode): no Capsule JSON was imported for the photo, or the photo changed after the import. The product was placed the default way. Paste or import the JSON (**⋯ → Paste Capsule JSON…**) and regenerate.
 
 ---
 

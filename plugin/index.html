@@ -49,8 +49,11 @@
             <button id="src-api" class="btn-small" title="The original automatic detection through the team backend">Backend API</button>
         </div>
         <div id="capsule-actions" class="capsule-actions hidden">
-            <div class="hint">Import the JSON that Adobe Capsule (Detect Focal Point) downloads for each original photo — name it like the photo (car_01.jpg → car_01.json), or import it per product with ⋯ → Import Capsule JSON. Check or adjust the box with ⋯ → Edit Subject Placement.</div>
-            <button id="btn-capsule-import" class="btn-small">Import Capsule JSON Files…</button>
+            <div class="hint">Import subject detection data from Adobe Capsule (Detect Focal Point). Copy the JSON on the workflow's Preview node and paste it for its photo — or import downloaded files named like the photos (car_01.jpg → car_01.json). Check or adjust the box with ⋯ → Edit Subject Placement.</div>
+            <div class="capsule-buttons">
+                <button id="btn-capsule-paste" class="btn-small btn-primary" title="Paste the JSON copied from the Capsule workflow and choose the photo it belongs to">Paste Capsule JSON…</button>
+                <button id="btn-capsule-import" class="btn-small" title="Import downloaded Capsule JSON files, paired with the photos by file name">Import JSON Files…</button>
+            </div>
             <div id="capsule-summary" class="summary"></div>
             <div id="capsule-message" class="run-message"></div>
         </div>

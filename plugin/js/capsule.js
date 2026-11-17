@@ -464,6 +464,21 @@ async function saveCapsuleStore(store) {
 async function importFile(store, imagePath, jsonPath, keepEdits) {
     let text;
     try { text = await readText(jsonPath); } catch (e) { return { ok: false, errors: ["could not read the file: " + String((e && e.message) || e)] }; }
+    return importText(store, imagePath, text, String(jsonPath).split(/[\/\\]/).pop(), keepEdits);
+}
+
+// Text copied from the Capsule workflow (Preview → Copy) — the same JSON as
+// the downloaded file. Tolerates surrounding blanks and a ```json fence.
+function cleanPastedText(text) {
+    let s = String(text == null ? "" : text).replace(/^\uFEFF/, "").trim();
+    const fence = /^```[a-zA-Z]*\s*([\s\S]*?)\s*```$/.exec(s);
+    if (fence) s = fence[1].trim();
+    return s;
+}
+
+// The import itself, from JSON text. sourceLabel is what the data is shown
+// as later ("car_01.json", "Pasted 2026-11-17 14:02").
+async function importText(store, imagePath, text, sourceLabel, keepEdits) {
     const parsed = parseCapsuleJson(text);
     if (!parsed.ok) return parsed;
     const fingerprint = await photoFingerprint(imagePath);
@@ -474,10 +489,17 @@ async function importFile(store, imagePath, jsonPath, keepEdits) {
     const ow = orientationWarning(header.exifOrientation);
     if (ow) warnings.push(ow);
     const r = importDetection(store, imagePath, parsed.detection, {
-        sourceFile: String(jsonPath).split(/[\/\\]/).pop(), fingerprint,
+        sourceFile: String(sourceLabel || ""), fingerprint,
         pixelSize: header.pixelSize, exifOrientation: header.exifOrientation, warnings,
     }, keepEdits);
     return Object.assign({ ok: true, warnings }, r);
+}
+
+// "Pasted 2026-11-17 14:02" (local time)
+function pastedLabel(now) {
+    const d = now || new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `Pasted ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 // A detector for one Generate run with the same interface as
@@ -514,5 +536,5 @@ module.exports = {
     layoutId, storeKey, entryStatus, effectiveValues, subjectFromEntry,
     importDetection, saveEdit, resetToAuto, acceptChangedPhoto,
     baseName, matchJsonFilesToPhotos, coverage, jpegExifOrientation, orientationWarning,
-    photoFingerprint, photoHeaderInfo, storePath, loadCapsuleStore, saveCapsuleStore, importFile, createCapsuleDetector,
+    photoFingerprint, photoHeaderInfo, storePath, loadCapsuleStore, saveCapsuleStore, importFile, importText, cleanPastedText, pastedLabel, createCapsuleDetector,
 };
