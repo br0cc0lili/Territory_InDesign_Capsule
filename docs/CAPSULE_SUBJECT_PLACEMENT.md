@@ -133,6 +133,7 @@ This is unchanged from the original plugin (`placement.js` `PLACEMENT_CONFIG.sub
 | Test | What it covers |
 |---|---|
 | `node tools/tests/run.js` | All offline tests, including the original suite unchanged, plus:<br>• `capsule.test.js`: JSON validation, adapter, store, bulk matching, a Capsule box giving identical placement plans to the same API box (48 cases)<br>• `capsulepreview.test.js`: Preview = `placeProductImage` (60 cases)<br>• `capsuleeditor.test.js`: coordinates, drag and resize, typed values, the window on a fake DOM<br>• `capsulepanel.test.js`: the real `index.js` on a fake UXP: import, Missing Detection Data, source switch, Apply / Regenerate warnings |
+| `node tools/tests/indesign/capsule-regression.js [git-ref]` | Needs a running InDesign. Runs the ORIGINAL plugin code (default `main`) and this working tree on the same synthetic files and subject boxes: Auto Placement and Custom Subject Frames must give identical pages, warnings, Image Extension analysis and preview export; Capsule mode with the same boxes must equal the original. Network blocked |
 | `node tools/tests/indesign/capsule-indesign.js` | Needs a running InDesign. Uses a synthetic Template Set (1200×1200, 800×600, 1080×1920, 1000×700 with a bleeding frame) and synthetic photos (1920×1280, 3000×2000, 1080×1350). It runs the plugin's own Generate, compares every placed graphic with Preview, checks the layout-only edit plus Regenerate, and exports preview JPGs. It only closes documents in its own test folder |
 
 ## Limitations
