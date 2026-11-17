@@ -1052,7 +1052,7 @@ async function editSubjectRow(rec) {
     await loadCapsule();
     const entry = capsuleEntryFor(rec);
     const status = capsuleMod.entryStatus(entry, entry ? await capsuleMod.photoFingerprint(rec.imagePath) : null);
-    if (status === "missing") { setMessage(`${rec.headline}: paste or import the Capsule JSON first (⋯ → Paste Capsule JSON…).`, channels.generate); return; }
+    if (status === "missing") { setMessage(`${rec.headline}: paste the Capsule JSON in step 3 or import it (⋯ → Import Capsule JSON File…).`, channels.generate); return; }
     if (status === "stale") {
         const a = await showDialog("Photo changed", `${photoLabel(rec.imagePath)} changed after its Capsule JSON was imported.`,
             [{ label: "Import New JSON…", value: "import" }, { label: "Keep Data for the Changed Photo…", value: "keep" }]);
