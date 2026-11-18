@@ -3,20 +3,21 @@
 //
 //   node tools/workflow/probe.js                       dry run: no network; builds the image and the request
 //   node tools/workflow/probe.js --live --auth stage   LIVE (only with approval): Stage OAuth S2S credential
-//                                                      + Stage App Builder Files for the image URL
+//                                                      + the deployed Stage actions for the image URL
 //
-// Options:  --workflow <id>  --node <node_id>  --storage-type <Azure|AWS|…>
+// Options:  --workflow <id>  --node <node_id>  --storage-type <external|…> (default: what workflow-image-url returns)
 //           --image-url <presigned GET url>        (skip App Builder Files)
 //           --stage-dir <path to territory-app>    (default ~/territory-app; its .env is read in-process, never printed or changed)
 //
 // Steps (live):
 //   1. IMS token: client_credentials with the Stage credential (client secret stays in this process)
-//   2. synthetic PNG → App Builder Files (Stage namespace) → presigned READ url (30 min)
+//   2. synthetic PNG → subject-upload-url (deployed, unchanged) → PUT → workflow-image-url → presigned READ url (15 min)
+//      (App Builder Files only works from inside Runtime, hence the deployed actions)
 //   3. POST /batch/execute (one run) → batchId
 //   4. GET /batch/{id}/status until completed / failed / cancelled (max 15 min)
 //   5. GET /batch/{id}/executions → find focalPoint + boundingBox (inline, or an allowed JSON link)
 //   6. validate with plugin/js/capsule.js parseCapsuleJson; compare with the synthetic car
-//   7. delete the uploaded image
+//   7. delete the uploaded image (workflow-image-url op "delete")
 // Every response is saved, redacted (no tokens, no presigned query strings), to
 // tools/test-output/workflow-probe/<time>/. Nothing in the plugin or the Stage backend changes.
 
@@ -30,7 +31,7 @@ const capsule = require("../../plugin/js/capsule.js");
 const DEFAULTS = {
     workflowId: "2d69b6ea-70a5-4119-b930-3d5e15ceff4e",   // published Capsule workflow (from the Publish dialog cURL)
     nodeId: "node-1794841303181-lnger91fw",               // its image input node
-    storageType: "Azure",                                  // App Builder Files = Azure Blob (windows.net); value to be confirmed
+    storageType: "",                                       // "" = use what workflow-image-url returns ("external": presigned URL, per the input-files node docs)
     stageDir: path.join(os.homedir(), "territory-app"),
     pollMs: 5000,
     maxWaitMs: 15 * 60 * 1000,
@@ -74,9 +75,17 @@ async function stageToken(env) {
     return { token: j.access_token, apiKey: clientId, orgId, userId: claims.userId || techId, claims };
 }
 
-async function stageFiles(stageDir, env) {
-    const lib = require(path.join(stageDir, "node_modules/@adobe/aio-lib-files"));
-    return lib.init({ ow: { namespace: first(env.AIO_runtime_namespace), auth: first(env.AIO_runtime_auth) } });
+// The deployed Stage web actions (same base URL form as the plugin's backend.config.json).
+function stageActions(env) {
+    const ns = first(env.AIO_runtime_namespace), key = first(env.PLUGIN_SHARED_KEY);
+    if (!ns || !key) throw new Error("the Stage .env has no AIO_runtime_namespace / PLUGIN_SHARED_KEY");
+    const base = `https://${ns}.adobeio-static.net/api/v1/web/territory-app`;
+    return async (action, body) => {
+        const res = await fetch(`${base}/${action}`, { method: "POST", headers: { "Content-Type": "application/json", "x-plugin-key": key }, body: JSON.stringify(body) });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(`${action}: HTTP ${res.status} ${j.error || ""}`.trim());
+        return j;
+    };
 }
 
 async function main() {
@@ -94,10 +103,10 @@ async function main() {
     const png = syntheticPng();
     fs.writeFileSync(path.join(outDir, "synthetic.png"), png);
     log(`synthetic image: ${SYNTHETIC.width}×${SYNTHETIC.height} PNG, ${png.length} bytes → ${path.join(outDir, "synthetic.png")}`);
-    log(`workflow ${cfg.workflowId} · input node ${cfg.nodeId} · storageType ${cfg.storageType}`);
+    log(`workflow ${cfg.workflowId} · input node ${cfg.nodeId} · storageType ${cfg.storageType || "(from workflow-image-url)"}`);
 
     if (!o.live) {
-        const req = api.buildBatchRequest({ workflowId: cfg.workflowId, nodeId: cfg.nodeId, imageUrls: ["https://<stage-files>.blob.core.windows.net/<path>?<sas>"], storageType: cfg.storageType });
+        const req = api.buildBatchRequest({ workflowId: cfg.workflowId, nodeId: cfg.nodeId, imageUrls: ["https://<stage-files>.blob.core.windows.net/<path>?<sas>"], storageType: cfg.storageType || "external" });
         save("request.dry-run.json", req);
         log("DRY RUN — no network. Request body:\n" + JSON.stringify(req, null, 2));
         log("Headers: Authorization (Bearer), x-api-key, x-gw-ims-org-id, x-gw-ims-user-id, api-version: 1.0");
@@ -111,16 +120,22 @@ async function main() {
     log(`IMS token: ${auth.claims.type || "?"} for client ${auth.claims.clientId ? "…" + String(auth.claims.clientId).slice(-4) : "?"}, scopes ${(auth.claims.scopes || []).join(",")}, expires ${auth.claims.expiresAt || "?"}`);
     const headers = api.apiHeaders(auth);
 
-    let files = null, storagePath = "", imageUrl = o.imageUrl || "";
+    const call = o.imageUrl ? null : stageActions(env);
+    let storagePath = "", imageUrl = o.imageUrl || "", storageType = cfg.storageType;
     try {
         if (!imageUrl) {
-            files = await stageFiles(cfg.stageDir, env);
-            storagePath = `subject/probe/PROBE_${stamp}.png`;
-            await files.write(storagePath, png);
-            imageUrl = await files.generatePresignURL(storagePath, { expiryInSeconds: 1800, permissions: "r" });
-            log(`image URL (App Builder Files, read, 30 min): ${api.redactUrl(imageUrl)}`);
+            const up = await call("subject-upload-url", { contentType: "image/png" });
+            storagePath = up.storagePath;
+            const put = await fetch(up.uploadUrl, { method: "PUT", headers: up.uploadHeaders, body: png });
+            log(`upload via subject-upload-url: ${storagePath} → PUT HTTP ${put.status}`);
+            if (!put.ok) throw new Error(`upload PUT failed: HTTP ${put.status}`);
+            const rd = await call("workflow-image-url", { storagePath });
+            imageUrl = rd.readUrl;
+            storageType = storageType || rd.storageType;
+            log(`read URL via workflow-image-url: ${api.redactUrl(imageUrl)} (${rd.expiresInSeconds} s, storageType ${rd.storageType}, ${rd.contentLength} bytes)`);
+            fs.writeFileSync(path.join(outDir, "0-image-url.json"), JSON.stringify(api.redact(rd), null, 2));
         }
-        const body = api.buildBatchRequest({ workflowId: cfg.workflowId, nodeId: cfg.nodeId, imageUrls: [imageUrl], storageType: cfg.storageType });
+        const body = api.buildBatchRequest({ workflowId: cfg.workflowId, nodeId: cfg.nodeId, imageUrls: [imageUrl], storageType: storageType || "external" });
         save("1-request.json", body);
         let res = await fetch(`${api.WORKFLOW_API.host}/batch/execute`, { method: "POST", headers, body: JSON.stringify(body) });
         let j = await res.json().catch(() => ({}));
@@ -167,7 +182,10 @@ async function main() {
         log(`  overlap with the synthetic car (IoU): ${score.toFixed(2)}`);
         return 0;
     } finally {
-        if (files && storagePath) { try { await files.delete(storagePath); log("uploaded probe image deleted"); } catch (e) { log("could not delete the probe image: " + storagePath); } }
+        if (call && storagePath) {
+            try { const d = await call("workflow-image-url", { storagePath, op: "delete" }); log(`probe image ${d.deleted ? "deleted" : "already gone"}: ${storagePath}`); }
+            catch (e) { log(`could not delete the probe image ${storagePath}: ${e.message}`); }
+        }
         log("saved (redacted): " + outDir);
     }
 }
