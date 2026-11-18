@@ -33,8 +33,11 @@ ok(cl.userId === "tech@techacct.adobe.com" && cl.scopes.join() === "openid,ff_ap
 const DET = { focalPoint: { x: 0.53, y: 0.65, normalized: true }, boundingBox: { x: 0.07, y: 0.3, width: 0.93, height: 0.7, normalized: true } };
 ok(api.findDetection([{ name: "result", value: DET }]).kind === "inline", "outputs: inline object found");
 const s = api.findDetection([{ type: "text", content: J(DET) }]);
-ok(s.kind === "inline" && s.detection.boundingBox.width === 0.93 && s.path === "outputs[0].content", "outputs: JSON string found (path " + s.path + ")");
+ok(s.kind === "inline" && s.detection.boundingBox.width === 0.93 && s.path === "outputs[0].content<json>", "outputs: JSON string found (path " + s.path + ")");
 ok(api.findDetection({ a: { b: [{ c: { data: DET } }] } }).kind === "inline", "outputs: deeply nested object found");
+const lst = api.findDetection([{ value: J([Object.assign({ uncertaintyScore: 0.12, name: "x.png" }, DET)]) }]);
+ok(lst.kind === "inline" && lst.detection.uncertaintyScore === 0.12 && lst.path === "outputs[0].value<json>[0]", "outputs: JSON text holding a list (one entry per image) found, extra fields kept");
+ok(capsule.parseCapsuleJson(J(lst.detection)).ok, "extra fields (uncertaintyScore, name) don't break the capsule.js validator");
 const l = api.findDetection([{ name: "image", href: "https://x.blob.core.windows.net/o/img.png?sig" }, { name: "json", href: "https://x.blob.core.windows.net/o/focal.json?sig" }]);
 ok(l.kind === "url" && /focal\.json/.test(l.url), "outputs: a JSON file link is chosen over an image link");
 ok(api.findDetection([{ href: "https://x.blob.core.windows.net/o/img.png?sig" }]).kind === "none", "outputs: only an image → nothing found");

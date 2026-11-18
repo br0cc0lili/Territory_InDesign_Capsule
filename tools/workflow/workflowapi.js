@@ -108,15 +108,18 @@ function findDetection(outputs) {
         if (hit || depth > 8 || v == null) return;
         if (typeof v === "string") {
             const s = v.trim();
-            if (s.startsWith("{") && s.indexOf("focalPoint") !== -1) {
-                try { const j = JSON.parse(s); if (looksLikeDetection(j)) { hit = { kind: "inline", detection: j, path }; return; } } catch (e) {}
+            if ((s.startsWith("{") || s.startsWith("[")) && s.indexOf("focalPoint") !== -1) {
+                // JSON text (e.g. the Execute Script text output): search inside it,
+                // also when it is a list ("one entry per input image")
+                let j; try { j = JSON.parse(s); } catch (e) { j = undefined; }
+                if (j !== undefined) { visit(j, path + "<json>", depth + 1); return; }
             }
             if (/^https:\/\//.test(s)) links.push({ url: s, path });
             return;
         }
         if (Array.isArray(v)) { v.forEach((x, i) => visit(x, `${path}[${i}]`, depth + 1)); return; }
         if (typeof v === "object") {
-            if (looksLikeDetection(v)) { hit = { kind: "inline", detection: { focalPoint: v.focalPoint, boundingBox: v.boundingBox }, path }; return; }
+            if (looksLikeDetection(v)) { hit = { kind: "inline", detection: v, path }; return; }
             for (const [k, x] of Object.entries(v)) visit(x, path ? `${path}.${k}` : k, depth + 1);
         }
     };
