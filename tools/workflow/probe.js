@@ -88,6 +88,35 @@ function stageActions(env) {
     };
 }
 
+// Checks a signed read URL without printing it: SAS permissions, expiry,
+// resource type and path; that it reads the upload; and that the same
+// signature does NOT open another file in or outside the upload folder.
+async function sasChecks(readUrl, storagePath, bytes) {
+    const u = new URL(readUrl);
+    const q = u.searchParams;
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail });
+    const seconds = Math.round((Date.parse(q.get("se") || "") - Date.now()) / 1000);
+    add("permissions (sp)", q.get("sp") === "r", `sp=${q.get("sp")}`);
+    add("expiry (se)", seconds > 0 && seconds <= 15 * 60 + 60, `expires in ${seconds} s`);
+    add("resource (sr)", q.get("sr") === "b", `sr=${q.get("sr")} (b = this blob only)`);
+    add("path", decodeURIComponent(u.pathname).endsWith("/" + storagePath), `…/${storagePath}`);
+    let r = await fetch(u.toString());
+    const got = r.ok ? (await r.arrayBuffer()).byteLength : 0;
+    add("reads the upload", r.status === 200 && got === bytes, `GET HTTP ${r.status}, ${got} bytes`);
+    const other = new URL(u.toString());
+    other.pathname = u.pathname.replace(/SUB_[0-9a-f]{12}-\d{13}/, "SUB_000000000000-" + Date.now());
+    r = await fetch(other.toString());
+    add("other file in subject/uploads/", r.status === 403, `GET HTTP ${r.status}`);
+    const outside = new URL(u.toString());
+    outside.pathname = u.pathname.replace(/subject\/uploads\/.*$/, "image-extension/uploads/EXT_00000000.png");
+    r = await fetch(outside.toString());
+    add("file outside the upload folder", r.status === 403, `GET HTTP ${r.status}`);
+    const write = await fetch(u.toString(), { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob" }, body: Buffer.from("x") });
+    add("write with the read URL", write.status === 403, `PUT HTTP ${write.status}`);
+    return { ok: checks.every((c) => c.ok), checks };
+}
+
 async function main() {
     const o = args(process.argv.slice(2));
     const cfg = {
@@ -134,6 +163,13 @@ async function main() {
             storageType = storageType || rd.storageType;
             log(`read URL via workflow-image-url: ${api.redactUrl(imageUrl)} (${rd.expiresInSeconds} s, storageType ${rd.storageType}, ${rd.contentLength} bytes)`);
             fs.writeFileSync(path.join(outDir, "0-image-url.json"), JSON.stringify(api.redact(rd), null, 2));
+        }
+        if (call && storagePath) {
+            // Security gate before any execution: read-only, ~15 min, this one blob only.
+            const sas = await sasChecks(imageUrl, storagePath, png.length);
+            fs.writeFileSync(path.join(outDir, "0b-sas-checks.json"), JSON.stringify(sas, null, 2));
+            for (const c of sas.checks) log(`  ${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
+            if (!sas.ok) { log("✗ read URL security checks failed — stopping before any workflow execution"); return 1; }
         }
         const body = api.buildBatchRequest({ workflowId: cfg.workflowId, nodeId: cfg.nodeId, imageUrls: [imageUrl], storageType: storageType || "external" });
         save("1-request.json", body);
