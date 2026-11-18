@@ -31,10 +31,11 @@ try { datamerge = require("./js/datamerge.js"); } catch (e) { loadErrors.push("d
 try { subjectMod = require("./js/subject.js"); } catch (e) { loadErrors.push("subject.js: " + e); }
 try { pickerMod = require("./js/subjectpicker.js"); } catch (e) { loadErrors.push("subjectpicker.js: " + e); }
 // Capsule subject source: imported Adobe Capsule JSON + its editor window.
-let capsuleMod = null, capsuleEditor = null, capsulePaste = null;
+let capsuleMod = null, capsuleEditor = null, capsulePaste = null, workflowMod = null;
 try { capsuleMod = require("./js/capsule.js"); } catch (e) { loadErrors.push("capsule.js: " + e); }
 try { capsuleEditor = require("./js/capsuleeditor.js"); } catch (e) { loadErrors.push("capsuleeditor.js: " + e); }
 try { capsulePaste = require("./js/capsulepaste.js"); } catch (e) { loadErrors.push("capsulepaste.js: " + e); }
+try { workflowMod = require("./js/workflowdetect.js"); } catch (e) { loadErrors.push("workflowdetect.js: " + e); }
 // Optional Auto Text Color palette reader — if it can't load, the palette row just stays empty.
 let colorpalette = null;
 try { colorpalette = require("./js/colorpalette.js"); } catch (e) { loadErrors.push("colorpalette.js: " + e); }
@@ -100,6 +101,7 @@ const el = {
     capsuleActions: document.getElementById("capsule-actions"),
     btnCapsuleImport: document.getElementById("btn-capsule-import"),
     btnCapsulePaste: document.getElementById("btn-capsule-paste"),
+    btnCapsuleWorkflow: document.getElementById("btn-capsule-workflow"),
     capsulePasteText: document.getElementById("capsule-paste-text"),
     capsulePasteStatus: document.getElementById("capsule-paste-status"),
     capsulePastePhoto: document.getElementById("capsule-paste-photo"),
@@ -294,6 +296,7 @@ function updateButtons() {
     el.btnDmPrepare.disabled = busy || !excelEntry;
     if (el.btnCapsuleImport) el.btnCapsuleImport.disabled = busy || !outputEntry;
     if (el.btnCapsulePaste) el.btnCapsulePaste.disabled = busy;
+    if (el.btnCapsuleWorkflow) el.btnCapsuleWorkflow.disabled = busy || !outputEntry;
     if (el.btnCapsulePasteImport) updatePasteState(true);
 }
 
@@ -717,6 +720,7 @@ if (el.srcCapsule) {
     el.srcApi.addEventListener("click", () => setSubjectSource("api"));
     el.btnCapsuleImport.addEventListener("click", () => importCapsuleFiles());
     if (el.btnCapsulePaste) el.btnCapsulePaste.addEventListener("click", () => pasteFromClipboard());
+    if (el.btnCapsuleWorkflow) el.btnCapsuleWorkflow.addEventListener("click", () => detectWithWorkflow(null));
     if (el.capsulePasteText) {
         el.capsulePasteText.addEventListener("input", () => updatePasteState());
         el.capsulePasteText.addEventListener("change", () => updatePasteState());
@@ -749,9 +753,11 @@ async function confirmCapsuleCoverage(rows) {
     if (stale.length) lines.push(`${stale.length} photo${stale.length === 1 ? "" : "s"} changed after the Capsule JSON was imported:\n${list(stale)}`);
     lines.push("\nYou can continue with the original plugin's default placement (no subject box). These products are marked Review — Missing Detection Data. The backend API is not used.");
     const answer = await showDialog("Missing Detection Data", lines.join("\n\n"), [
+        { label: "Detect with Adobe Workflow…", value: "workflow" },
         { label: "Import Capsule JSON Files…", value: "import" },
         { label: "Continue with Default Placement", value: "go", danger: true },
     ]);
+    if (answer === "workflow") { await detectWithWorkflow(null); return false; }
     if (answer === "import") { await importCapsuleFiles(); return false; }
     return answer === "go";
 }
@@ -861,6 +867,116 @@ async function confirmReplaceCapsule(imagePath) {
             : [{ label: "Replace", value: "keep" }]);
     if (answer !== "keep" && answer !== "drop") return null;
     return answer === "keep";
+}
+
+// ---------- Step 3 → Detect with Adobe Workflow ----------
+// The published Adobe Workflow (Detect Focal Point) runs on the photos the
+// plugin already has, through the team backend (workflowdetect.js): no second
+// upload by the designer, no Capsule page, no copy & paste. Results are stored
+// through capsule.js importText — the same validation and capsule_subjects.json
+// as an imported file. Runs only when the designer asks (never on Generate).
+//   rec: one product (⋯ menu) or null (all matched photos)
+
+function workflowSay(rec, text) {
+    if (rec) setMessage(text, channels.generate); else setCapsuleMessage(text);
+}
+
+async function detectWithWorkflow(rec) {
+    const say = (t) => workflowSay(rec, t);
+    if (!capsuleMod || !workflowMod) { say("capsule.js / workflowdetect.js failed to load — see the banner above."); return; }
+    if (!outputEntry) { say("Select the output folder (step 1) first — Capsule data is saved there."); return; }
+    if (busy) return;
+    const paths = rec ? (rec.imagePath ? [rec.imagePath] : []) : await ensureMatchedPhotos();
+    if (!paths || !paths.length) return;
+    const sc = subjectMod && subjectMod.loadSubjectConfig ? await subjectMod.loadSubjectConfig({ forObjects: true }) : { config: null, reason: "subject.js failed to load" };
+    if (!sc.config) { say("Adobe Workflow detection needs the team backend connection (plugin/backend.config.json): " + sc.reason + ". You can still paste or import Capsule JSON."); return; }
+    await loadCapsule();
+    if (capsuleStore && capsuleStore.error) { say("⚠ " + capsuleStore.error + " — nothing detected."); return; }
+
+    // which photos: without data / changed by default; all on request
+    const unique = [];
+    const seen = new Set();
+    for (const p of paths) { const k = capsuleMod.storeKey(p); if (!seen.has(k)) { seen.add(k); unique.push(p); } }
+    const statusOf = new Map();
+    for (const p of unique) {
+        const entry = capsuleStore.items[capsuleMod.storeKey(p)];
+        statusOf.set(p, capsuleMod.entryStatus(entry, entry ? await capsuleMod.photoFingerprint(p) : null));
+    }
+    const pending = unique.filter((p) => ["missing", "stale"].includes(statusOf.get(p)));
+    const withData = unique.filter((p) => ["auto", "manual"].includes(statusOf.get(p)));
+    const n = (k, w) => `${k} photo${k === 1 ? "" : "s"}${w ? " " + w : ""}`;
+    const lines = [
+        "The photos are sent to the team backend and the published Adobe Workflow (Detect Focal Point) runs once per photo. Detection uses Adobe credits; the uploaded copies are deleted afterwards.",
+        [pending.length ? n(pending.length, "without data or changed") : "", withData.length ? n(withData.length, "already with Capsule data") : ""].filter(Boolean).join(" · "),
+    ];
+    const buttons = [];
+    if (pending.length) buttons.push({ label: `Detect ${n(pending.length)}`, value: "pending" });
+    if (withData.length) buttons.push({ label: rec ? "Re-detect This Photo" : `Re-detect All ${n(unique.length)}`, value: "all", danger: !pending.length });
+    if (unique.length > workflowMod.WORKFLOW_DETECT.maxPhotos) { say(`At most ${workflowMod.WORKFLOW_DETECT.maxPhotos} photos per detection — detect per product (⋯) or in smaller sets.`); return; }
+    const scope = await showDialog("Detect with Adobe Workflow", lines.join("\n\n"), buttons);
+    if (scope !== "pending" && scope !== "all") return;
+    const targets = scope === "all" ? unique : pending;
+    let keep = true;
+    const edited = targets.filter((p) => { const e = capsuleStore.items[capsuleMod.storeKey(p)]; return e && capsuleMod.entryStatus(e, null) === "manual"; });
+    if (edited.length) {
+        const a = await showDialog("Replace Capsule data?", `${n(edited.length)} ${edited.length === 1 ? "has" : "have"} your adjustments (box or focal point):\n` +
+            edited.slice(0, 8).map((p) => "• " + photoLabel(p)).join("\n") + (edited.length > 8 ? `\n…and ${edited.length - 8} more` : ""),
+            [{ label: "Detect — Keep My Adjustments", value: "keep" }, { label: "Detect — Discard My Adjustments", value: "drop", danger: true }]);
+        if (a !== "keep" && a !== "drop") return;
+        keep = a === "keep";
+    }
+
+    setBusy(true);
+    let run;
+    try {
+        const deps = Object.assign(workflowMod.createDeps(sc.config, fetch, require("uxp").storage), {
+            fingerprint: (p) => capsuleMod.photoFingerprint(p),
+            onProgress: (pr) => {
+                if (pr.phase === "upload") say(`Adobe Workflow: uploading photo ${Math.min(pr.done + 1, pr.total)} of ${pr.total}…`);
+                else {
+                    const g = pr.progress || {};
+                    say(`Adobe Workflow: detecting — ${(g.completed || 0) + (g.failed || 0)} of ${pr.total} done${pr.status ? " (" + pr.status + ")" : ""}…`);
+                }
+            },
+        });
+        run = await workflowMod.detectPhotos(targets, deps);
+    } catch (e) {
+        setBusy(false);
+        say("Adobe Workflow detection failed: " + errorText(e));
+        return;
+    }
+    setBusy(false);
+
+    // store: through capsule.js (same validation as a file); a photo changed during the run is not stored
+    await loadCapsule();
+    const label = workflowMod.workflowLabel() + (run.batchId ? " · " + run.batchId.slice(-8) : "");
+    const done = [], failed = [], notes = [];
+    for (const r of run.results) {
+        const who = manifestRows.filter((x) => x.status === "matched" && x.imagePath && capsuleMod.storeKey(x.imagePath) === capsuleMod.storeKey(r.imagePath)).map((x) => x.headline);
+        const name = (who.length ? who.slice(0, 2).join(", ") + " — " : "") + photoLabel(r.imagePath);
+        if (!r.ok) { failed.push(`✗ ${name}: ${r.error}`); continue; }
+        if (!workflowMod.sameFingerprint(r.fingerprint, await capsuleMod.photoFingerprint(r.imagePath))) {
+            failed.push(`✗ ${name}: the photo changed during detection — detect it again`);
+            continue;
+        }
+        const imp = await capsuleMod.importText(capsuleStore, r.imagePath, JSON.stringify(r.detection), label, keep);
+        if (!imp.ok) { failed.push(`✗ ${name}: ${imp.errors.join("; ")}`); continue; }
+        done.push(`✓ ${name}`);
+        for (const w of imp.warnings) notes.push(`Note — ${photoLabel(r.imagePath)}: ${w}`);
+    }
+    if (done.length) {
+        try { await capsuleMod.saveCapsuleStore(capsuleStore); } catch (e) {
+            await loadCapsule();
+            say("Couldn't save the Capsule data: " + errorText(e));
+            return;
+        }
+    }
+    const head = `Adobe Workflow: ✓ ${done.length} detected` + (failed.length ? ` · ✗ ${failed.length} not detected` : "") +
+        (done.length ? " — ⋯ → Edit Subject Placement to check, Generate (or ⋯ → Regenerate .indd) to apply." : "") +
+        (failed.length ? " Paste or import Capsule JSON for the photos that failed." : "");
+    say([head].concat(done.slice(0, 12), failed.slice(0, 12), notes.slice(0, 6)).join("\n"));
+    await refreshCapsuleSummary();
+    renderTable();
 }
 
 // ---------- Step 3 → Paste Capsule JSON (the box under the button) ----------
@@ -2265,12 +2381,13 @@ async function productActions(rec) {
         const entry = capsuleEntryFor(rec);
         const cst = capsuleMod.entryStatus(entry, entry ? await capsuleMod.photoFingerprint(rec.imagePath) : null);
         const text = {
-            missing: ["detail-warning", "Capsule ⚠ Missing Detection Data — paste or import the JSON"],
+            missing: ["detail-warning", "Capsule ⚠ Missing Detection Data — detect, paste or import it"],
             stale: ["detail-warning", "Capsule ⚠ The photo changed after the import"],
             auto: ["detail-muted", `Capsule ✓ ${entry && entry.auto.sourceFile ? entry.auto.sourceFile : "imported"}`],
             manual: ["detail-muted", `Capsule ✓ ${entry && entry.auto.sourceFile ? entry.auto.sourceFile : "imported"} · adjusted`],
         }[cst];
         subjectGroup.push({ header: "Subject (Capsule)" }, { status: [text] },
+            { label: cst === "missing" || cst === "stale" ? "Detect with Adobe Workflow…" : "Re-detect with Adobe Workflow…", value: "capsule_workflow" },
             { label: "Paste Capsule JSON (Step 3)", value: "capsule_paste" },
             { label: cst === "missing" ? "Import Capsule JSON File…" : "Re-import Capsule JSON File…", value: "capsule_import" });
         if (cst === "auto" || cst === "manual") subjectGroup.push({ label: "Edit Subject Placement…", value: "capsule_edit" });
@@ -2303,6 +2420,7 @@ async function productActions(rec) {
     const answer = await showDialog(rec.headline, "", entries, { withText: true, closeLabel: stored ? "Close" : "Cancel" });
     const choice = answer.value;
     if (choice === "choose_subject") await chooseSubjectRow(rec);
+    if (choice === "capsule_workflow") await detectWithWorkflow(rec);
     if (choice === "capsule_paste") await pasteForRow(rec);
     if (choice === "capsule_import") await importCapsuleForRow(rec);
     if (choice === "capsule_edit") await editSubjectRow(rec);

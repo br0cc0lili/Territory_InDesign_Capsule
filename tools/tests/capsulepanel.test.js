@@ -59,6 +59,40 @@ const o = Module._load;
 Module._load = function (r) { if (r === "uxp") return uxp; if (r === "indesign") return { app: {} }; return o.apply(this, arguments); };
 const realRender = require(PLUGIN + "/js/render.js");
 const capsule = require(PLUGIN + "/js/capsule.js");
+const wdMod = require(PLUGIN + "/js/workflowdetect.js");
+wdMod.WORKFLOW_DETECT.pollIntervalMs = 1;
+
+// ---------- fake team backend for "Detect with Adobe Workflow" ----------
+const BACKEND = "https://ns-stage.adobeio-static.net/api/v1/web/territory-app";
+const wfb = { config: null, puts: [], detectCalls: [], polls: 0, results: null, onDone: null, startError: null, n: 0 };
+const fakeFetch = async (url, init) => {
+    const reply = (status, body) => ({ ok: status < 300, status, json: async () => body });
+    if (url.startsWith(BACKEND + "/")) {
+        if (init.headers["x-plugin-key"] !== "KEY") return reply(401, { error: "invalid plugin key" });
+        const action = url.slice(BACKEND.length + 1), body = JSON.parse(init.body);
+        if (action === "subject-upload-url") {
+            const sp = `subject/uploads/SUB_${String(++wfb.n).padStart(12, "0")}-${Date.now()}.${body.contentType === "image/png" ? "png" : "jpg"}`;
+            return reply(200, { uploadUrl: "https://files.example/put/" + sp + "?sig=SECRET", storagePath: sp, uploadHeaders: { "x-ms-blob-type": "BlockBlob", "Content-Type": body.contentType } });
+        }
+        if (action === "capsule-detect") {
+            if (wfb.startError) return reply(409, { error: wfb.startError });
+            wfb.detectCalls.push(body.storagePaths); wfb.polls = 0;
+            return reply(200, { jobId: "CDJ_00000000000000aa", batchId: "batch-2d69b6ea-test-0000abcd", count: body.storagePaths.length, status: "pending" });
+        }
+        if (action === "capsule-detect-status") {
+            wfb.polls++;
+            const paths = wfb.detectCalls[wfb.detectCalls.length - 1];
+            if (wfb.polls === 1) return reply(200, { state: "running", status: "running", progress: { total: paths.length, completed: 0, failed: 0 } });
+            if (wfb.onDone) wfb.onDone(paths);
+            return reply(200, { state: "done", status: "completed", results: wfb.results(paths) });
+        }
+    }
+    if (url.startsWith("https://files.example/put/")) {
+        wfb.puts.push({ storagePath: url.slice("https://files.example/put/".length).split("?")[0], bytes: init.body.byteLength });
+        return reply(201, null);
+    }
+    throw new Error("unexpected fetch " + url);
+};
 
 // ---------- stubbed render.js (no InDesign) ----------
 const calls = { generate: [], closed: [], opened: [], backups: [] };
@@ -129,11 +163,13 @@ const sandboxRequire = (r) => {
     if (r === "./js/matcher.js") return { buildManifest: async () => ROWS.map((x) => Object.assign({}, x)) };
     if (r === "./js/capsule.js") return capsule;
     if (r === "./js/capsulepaste.js") return require(PLUGIN + "/js/capsulepaste.js");
+    if (r === "./js/workflowdetect.js") return wdMod;
+    if (r === "./js/subject.js") return { loadSubjectConfig: async () => (wfb.config ? { config: wfb.config, reason: "" } : { config: null, reason: "backend not configured (plugin/backend.config.json missing)" }) };
     if (r === "./js/capsuleeditor.js") return { showCapsuleEditor: async (opts) => { const a = editorAnswers.shift(); return typeof a === "function" ? a(opts) : a; } };
     return {};
 };
 const sandbox = {
-    require: sandboxRequire, document, localStorage, location: { reload() {} }, console,
+    require: sandboxRequire, document, localStorage, location: { reload() {} }, console, fetch: fakeFetch,
     setTimeout, clearTimeout, setInterval: () => 0, Promise, Date, JSON, Math, Array, Object, Map, Set, String, Number, Error, RegExp, isNaN, Uint8Array,
     __dialog: async (title, message, buttons, options) => {
         dialogs.push({ title, message, buttons: (buttons || []).filter((b) => b.label).map((b) => b.label), entries: buttons });
@@ -147,7 +183,7 @@ const sandbox = {
 vm.createContext(sandbox);
 let src = fs.readFileSync(PLUGIN + "/js/index.js", "utf8");
 src = src.replace("function showDialog(title, message, buttons, options) {", "function showDialog(title, message, buttons, options) { if (globalThis.__dialog) return globalThis.__dialog(title, message, buttons, options);");
-src += "\n;globalThis.__panel = { init, subjectSource, setSubjectSource, refreshCapsuleSummary, confirmCapsuleCoverage, importCapsuleFiles, importCapsuleForRow, editSubjectRow, regenerateRow, productActions, subjectLine, warningSummary, getStatus, setStatus, capsulePendingLine, rows: () => manifestRows };";
+src += "\n;globalThis.__panel = { init, subjectSource, setSubjectSource, refreshCapsuleSummary, confirmCapsuleCoverage, importCapsuleFiles, importCapsuleForRow, detectWithWorkflow, editSubjectRow, regenerateRow, productActions, subjectLine, warningSummary, getStatus, setStatus, capsulePendingLine, rows: () => manifestRows };";
 vm.runInContext(src, sandbox, { filename: "index.js" });
 const P = sandbox.__panel;
 const text = (id) => nodes[id] ? nodes[id].textContent : "";
@@ -202,7 +238,7 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     await nodes["btn-generate"].fire("click");
     const md = dialogs[dialogs.length - 1];
     ok(md.title === "Missing Detection Data" && /A3 — A3\/hero\.jpg/.test(md.message) && !/A6 Avant —/.test(md.message), "Generate All: lists only the product without Capsule data");
-    ok(md.buttons.join("|") === "Import Capsule JSON Files…|Continue with Default Placement", "choices: import, or continue with the default placement");
+    ok(md.buttons.join("|") === "Detect with Adobe Workflow…|Import Capsule JSON Files…|Continue with Default Placement", "choices: detect with Adobe Workflow, import, or continue with the default placement");
     ok(calls.generate.length === 0, "Cancel → nothing generated");
     answers.push({ pick: /Continue with Default Placement/ }, { pick: /Replace and Generate All/ });
     await nodes["btn-generate"].fire("click");
@@ -361,6 +397,85 @@ const rowOf = (h) => P.rows().find((r) => r.headline === h);
     answers.push({ pick: /^Replace$/ });
     await imp.fire("click");
     ok(readStore().items[P2.toLowerCase()].auto.focalPoint.x === 0.5 && /✓ Capsule data pasted for Q5\/car_02\.png \(Q5\)/.test(text("capsule-message")), "Replace → stored for Q5");
+
+    // ---------- Detect with Adobe Workflow ----------
+    // state here: A6 (P1) photo changed → stale; Q5 (P2) and A3 (P3) have pasted data
+    const sizeOf = (p) => fs.statSync(p).size;
+    const photoOfUpload = (paths) => paths.map((sp) => { const put = wfb.puts.find((x) => x.storagePath === sp); return [P1, P2, P3].find((p) => sizeOf(p) === put.bytes); });
+    const W = (x) => ({ ok: true, focalPoint: { x: x + 0.1, y: 0.55, normalized: true }, boundingBox: { x, y: 0.3, width: 0.5, height: 0.6, normalized: true }, source: "detect-focal-point" });
+    let raw7 = fs.readFileSync(storeFile, "utf8");
+    // no backend connection → explained, nothing uploaded
+    await nodes["btn-capsule-workflow"].fire("click");
+    ok(/needs the team backend connection \(plugin\/backend\.config\.json\).*paste or import/.test(text("capsule-message")) && wfb.puts.length === 0, "no backend.config.json → explained, paste/import suggested, nothing uploaded");
+    wfb.config = { baseUrl: BACKEND, pluginKey: "KEY" };
+    // the choice dialog; Cancel → nothing
+    answers.push(null);
+    await nodes["btn-capsule-workflow"].fire("click");
+    const wd1 = dialogs[dialogs.length - 1];
+    ok(wd1.title === "Detect with Adobe Workflow" && wd1.buttons.join("|") === "Detect 1 photo|Re-detect All 3 photos" && /1 photo without data or changed · 2 photos already with Capsule data/.test(wd1.message) && /Adobe credits/.test(wd1.message),
+        "dialog: detect the photos without data/changed, or re-detect all; credits mentioned");
+    ok(wfb.puts.length === 0 && fs.readFileSync(storeFile, "utf8") === raw7, "Cancel → nothing uploaded or stored");
+    // detect the changed photo (A6): one upload, one batch, stored through capsule.js, no longer stale
+    wfb.results = (paths) => photoOfUpload(paths).map((p, i) => Object.assign({ index: i }, W(p === P1 ? 0.12 : 0.2)));
+    answers.push({ pick: /^Detect 1 photo$/ });
+    await nodes["btn-capsule-workflow"].fire("click");
+    const e1 = readStore().items[P1.toLowerCase()];
+    ok(wfb.puts.length === 1 && wfb.detectCalls.length === 1 && wfb.detectCalls[0].length === 1 && photoOfUpload(wfb.detectCalls[0])[0] === P1, "only the changed photo uploaded (its own bytes), one batch");
+    ok(e1 && e1.auto.boundingBox.x === 0.12 && /^Adobe Workflow · \d{4}-\d\d-\d\d \d\d:\d\d · 0000abcd$/.test(e1.auto.sourceFile) && e1.photo.size === sizeOf(P1) && e1.pixelSize.width === 6000,
+        "A6 stored via capsule.js with source 'Adobe Workflow · <date> · <batch>', current photo fingerprint, pixel size");
+    ok(/^Adobe Workflow: ✓ 1 detected — /.test(text("capsule-message")) && /✓ A6 Avant — A6\/car_01\.jpg/.test(text("capsule-message")) && !/SECRET|files\.example|sig=/.test(text("capsule-message")),
+        "per-photo result shown; no upload URL in the message: " + text("capsule-message").split("\n")[0]);
+    ok(/Capsule data: 3 of 3 photos/.test(text("capsule-summary")) && !/changed since import/.test(text("capsule-summary")), "summary: no longer stale: " + text("capsule-summary"));
+
+    // re-detect all, with an adjusted photo → keep my adjustments; results out of order; one run failed
+    const st8 = readStore();
+    st8.items[P2.toLowerCase()].manual = { boundingBox: { x: 0.05, y: 0.05, width: 0.5, height: 0.5 }, focalPoint: null };
+    fs.writeFileSync(storeFile, JSON.stringify(st8));
+    wfb.results = (paths) => photoOfUpload(paths).map((p, i) => p === P3 ? { index: i, ok: false, error: "workflow run failed: input asset not reachable (403)" } : Object.assign({ index: i }, W(p === P2 ? 0.33 : 0.13))).reverse();
+    answers.push({ pick: /^Re-detect All 3 photos$/ }, { pick: /Keep My Adjustments/ });
+    await nodes["btn-capsule-workflow"].fire("click");
+    const keepDlg = dialogs[dialogs.length - 1];
+    const s9 = readStore().items;
+    ok(keepDlg.title === "Replace Capsule data?" && /1 photo has your adjustments/.test(keepDlg.message) && /Q5\/car_02\.png/.test(keepDlg.message), "adjusted photo → keep/discard asked");
+    ok(wfb.detectCalls[1].length === 3 && s9[P2.toLowerCase()].auto.boundingBox.x === 0.33 && s9[P2.toLowerCase()].manual.boundingBox.x === 0.05 && s9[P1.toLowerCase()].auto.boundingBox.x === 0.13,
+        "3 photos in one batch; results matched by index although returned out of order; Q5 adjustment kept");
+    ok(s9[P3.toLowerCase()].auto.sourceFile !== undefined && !/^Adobe Workflow/.test(s9[P3.toLowerCase()].auto.sourceFile) && /✗ A3 — A3\/hero\.jpg: workflow run failed: input asset not reachable \(403\)/.test(text("capsule-message")) && /✓ 2 detected · ✗ 1 not detected/.test(text("capsule-message")),
+        "failed run → that photo keeps its previous data, error shown per photo");
+    // discard adjustments
+    answers.push({ pick: /^Re-detect All 3 photos$/ }, { pick: /Discard My Adjustments/ });
+    wfb.results = (paths) => paths.map((sp, i) => Object.assign({ index: i }, W(0.15)));
+    await nodes["btn-capsule-workflow"].fire("click");
+    ok(readStore().items[P2.toLowerCase()].manual === null && readStore().items[P2.toLowerCase()].auto.boundingBox.x === 0.15, "Discard My Adjustments → imported values only");
+
+    // a photo that changes during detection is not stored (and is stale afterwards)
+    const before10 = readStore().items[P3.toLowerCase()].auto.boundingBox.x;
+    wfb.onDone = () => { if (sizeOf(P3) === 23) fs.writeFileSync(P3, Buffer.concat([fs.readFileSync(P3), Buffer.from([1, 2, 3, 4])])); };
+    wfb.results = (paths) => paths.map((sp, i) => Object.assign({ index: i }, W(0.4)));
+    answers.push({ pick: /^Re-detect All 3 photos$/ });
+    await nodes["btn-capsule-workflow"].fire("click");
+    wfb.onDone = null;
+    ok(readStore().items[P3.toLowerCase()].auto.boundingBox.x === before10 && /✗ A3 — A3\/hero\.jpg: the photo changed during detection — detect it again/.test(text("capsule-message")) && /changed since import/.test(text("capsule-summary")),
+        "photo changed during the run → not stored, reported, marked stale");
+    // invalid detection from the backend → rejected by capsule.js
+    wfb.results = (paths) => paths.map((sp, i) => ({ index: i, ok: true, focalPoint: { x: 0.5, y: 0.5, normalized: true }, boundingBox: { x: 0.7, y: 0.1, width: 0.6, height: 0.3, normalized: true } }));
+    raw7 = fs.readFileSync(storeFile, "utf8");
+    answers.push({ pick: /^Detect 1 photo$/ });
+    await nodes["btn-capsule-workflow"].fire("click");
+    ok(fs.readFileSync(storeFile, "utf8") === raw7 && /✗ A3 — A3\/hero\.jpg: boundingBox\.x \+ width = 1\.3 is greater than 1/.test(text("capsule-message")), "invalid box (x + width > 1) → rejected by the existing capsule.js validation, nothing stored: " + text("capsule-message").split("\n")[1]);
+    // backend refuses to start → every photo reported, nothing stored
+    wfb.startError = "upload already used by another detection: SUB_x.png";
+    answers.push({ pick: /^Detect 1 photo$/ });
+    await nodes["btn-capsule-workflow"].fire("click");
+    wfb.startError = null;
+    ok(fs.readFileSync(storeFile, "utf8") === raw7 && /✗ A3 — A3\/hero\.jpg: Adobe Workflow could not be started: upload already used/.test(text("capsule-message")), "capsule-detect refused → reported per photo, nothing stored");
+    // ⋯ menu: per product; Missing Detection Data dialog offers it too
+    answers.push({ pick: /Detect with Adobe Workflow…/ }, { pick: /^Detect 1 photo$/ });
+    wfb.results = (paths) => paths.map((sp, i) => Object.assign({ index: i }, W(0.21)));
+    const calls11 = wfb.detectCalls.length;
+    await P.productActions(rowOf("A3"));
+    ok(wfb.detectCalls.length === calls11 + 1 && wfb.detectCalls[calls11].length === 1 && readStore().items[P3.toLowerCase()].auto.boundingBox.x === 0.21 && /Adobe Workflow: ✓ 1 detected/.test(text("gen-message")),
+        "⋯ → Detect with Adobe Workflow… on one product → only its photo; result in the product area");
+    ok(!nodes["btn-capsule-workflow"].disabled && wfb.detectCalls.every((c) => c.every((sp) => /^subject\/uploads\/SUB_\d{12}-\d{13}\.(png|jpg)$/.test(sp))), "button enabled again; only subject-upload-url paths sent to capsule-detect");
 
     console.log(f ? `${f} FAILED` : "all passed");
     process.exit(f ? 1 : 0);
