@@ -2592,10 +2592,15 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     // Extension for the pages that waited at Generate. A page that is still
     // not covered (its extension failed / wasn't possible) keeps waiting.
     let textColor = null;
+    const textColorLog = []; // one JSON line per page, written with the other log lines below
     const tcSwatches = options && options.textColor && options.textColor.swatches;
     if (appliedAny && tcSwatches && tcSwatches.length) {
         const waitForExtension = pagesAwaitingExtension(pages.filter((p) => !p.applied).map((p) => p.record));
-        try { textColor = summarizeTextColors(await autoTextColorForDocument(doc, plan, tcSwatches, { waitForExtension })); } catch (e) {}
+        let tc = [];
+        try { tc = await autoTextColorForDocument(doc, plan, tcSwatches, { waitForExtension }); }
+        catch (e) { tc = [{ layout: "all pages", error: String((e && e.message) || e) }]; } // never fails the extension
+        textColor = summarizeTextColors(tc);
+        for (const r of tc) textColorLog.push(JSON.stringify({ product: headline, kind: "textColor", layout: r.layout, line: textColorLogLine(r) }));
         // The new colours (and any low-contrast warning) are part of the check.
         if (textColor) check = checkProductPages(doc, plan);
     }
@@ -2623,7 +2628,7 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
         originalWorkingTarget: p.meta ? (p.meta.originalWorkingTarget || p.meta.fullResolutionTarget || null) : null,
         fireflyWorkingTarget: p.meta ? p.meta.target : null, workingScale: p.meta ? p.meta.workingScale : null,
         cacheHit: p.cacheHit, applied: p.applied, error: p.error || "",
-    }));
+    })).concat(textColorLog);
     return {
         pages: pages.map((p) => ({ layout: p.record.layout, status: p.record.status, applied: p.applied, error: p.error })),
         generations: todo.map((p) => ({ layout: p.record.layout, planId: p.plan.id, generationPlan: p.meta ? p.meta.planId : null,
@@ -2770,20 +2775,92 @@ function applyTextColor(doc, frame, paraIndex, swatch) {
 
 // The choice per role is recorded on the frame (script label): traceability,
 // and pageWarnings() keeps flagging low contrast at Preview / Commit.
-//   { v: 2, headline: { swatch, name, score, threshold, readable }, subline: … }
-function writeTextColorLabel(frame, roles) {
-    const label = { v: 2 };
+//   { v: 2, method, template: { headline: rgb, subline: rgb },
+//     headline: { swatch, name, score, threshold, readable, keptTemplate }, subline: … }
+// `template` is the template's ORIGINAL text colour, captured the first time
+// the page is coloured, so later runs (after Extend) still prefer the
+// designer's colour rather than whatever Auto Text Color applied before.
+function writeTextColorLabel(frame, roles, template, method, templateNotes) {
+    const label = { v: 2, method: method || undefined, template: template || undefined, templateNotes: templateNotes || undefined };
     for (const r of roles) {
-        if (r.swatch) label[r.role] = { swatch: r.swatchId, name: r.swatch, score: r.score, threshold: r.threshold, readable: r.readable };
+        if (r.swatch) label[r.role] = { swatch: r.swatchId, name: r.swatch, score: r.score, threshold: r.threshold, readable: r.readable,
+            keptTemplate: r.keptTemplate || undefined };
     }
     try { frame.insertLabel(TEXT_COLOR_LABEL, JSON.stringify(label)); } catch (e) {}
+}
+
+function readTextColorLabel(frame) {
+    try { return JSON.parse(frame.extractLabel(TEXT_COLOR_LABEL) || "null"); } catch (e) { return null; }
+}
+
+// PURE. A score with its unit: "Lc 52" (APCA) or "4.2:1" (WCAG 2).
+function contrastText(score, method) {
+    return method === "apca" ? `Lc ${score}` : `${score}:1`;
 }
 
 // PURE. "low text contrast" warnings from a stored label (v2), [] otherwise.
 function lowContrastWarnings(label) {
     if (!label || label.v !== 2) return [];
     return ["headline", "subline"].filter((k) => label[k] && label[k].readable === false)
-        .map((k) => `low text contrast — ${k} ${label[k].name} reaches ${label[k].score}:1 in its weakest part (needs ${label[k].threshold}:1); best of the selected colours`);
+        .map((k) => `low text contrast — ${k} ${label[k].name} reaches ${contrastText(label[k].score, label.method)} in its weakest part (needs ${contrastText(label[k].threshold, label.method)}); best of the selected colours`);
+}
+
+// PURE. sRGB (0–255) for an InDesign colour's space + colorValue, or null.
+// `space` is matched by name as well as by enum value: UXP returns enums in
+// different shapes across InDesign builds (object, number, string), so an
+// `===` against ColorSpace.RGB alone is not reliable.
+function colorValueToRgb(space, values, enums, toRgb) {
+    const v = Array.from(values || [], Number);
+    if (!v.length || !v.every(isFinite)) return null;
+    // A primitive (number / string) form of an enum, or null for a plain
+    // object — String() of any two objects is the same "[object Object]".
+    const prim = (x) => {
+        if (x === null || x === undefined) return null;
+        const p = typeof x === "object" && typeof x.valueOf === "function" ? x.valueOf() : x;
+        return typeof p === "object" ? null : String(p);
+    };
+    const is = (k) => {
+        const e = enums && enums[k];
+        if (e !== undefined) {
+            if (space === e) return true;
+            const a = prim(space), b = prim(e);
+            if (a !== null && a === b) return true;
+        }
+        const p = prim(space);
+        return p !== null && new RegExp("(^|[^A-Z])" + k + "([^A-Z]|$)", "i").test(p);
+    };
+    if (is("CMYK") || (!is("RGB") && !is("LAB") && v.length === 4)) return toRgb("CMYK", v.map((x) => x / 100));
+    if (is("LAB")) return toRgb("LAB", [v[0] / 100, v[1], v[2]]);
+    if (is("RGB") || (v.length === 3 && v.every((x) => x >= 0 && x <= 255))) return v.slice(0, 3);
+    return null;
+}
+
+// The paragraph's CURRENT fill colour as sRGB (0–255): { rgb } or
+// { rgb: null, note } saying why not (None, gradient, unknown space, error),
+// so a failure shows up in the label instead of disappearing.
+// Paper → white; a tint is mixed with white.
+function paragraphColorRgb(para) {
+    try {
+        let c = para.fillColor;
+        if (!c || c.isValid === false) return { rgb: null, note: "no fill colour" };
+        let tint = Number(para.fillTint);
+        const kind = String((c.constructor && c.constructor.name) || "");
+        if (kind === "Tint") { tint = Number(c.tintValue); c = c.baseColor; }
+        if (kind === "Gradient") return { rgb: null, note: "gradient fill" };
+        const name = String(c.name || "");
+        if (name === "None") return { rgb: null, note: "fill None" };
+        let rgb = null;
+        if (name === "Paper") rgb = [255, 255, 255];
+        else {
+            const { ColorSpace } = indesign();
+            rgb = colorValueToRgb(c.space, c.colorValue, ColorSpace, textColorModules().palette.toRgb);
+            if (!rgb) return { rgb: null, note: `unreadable colour "${name}" (${kind}, space ${String(c.space)}, values ${JSON.stringify(Array.from(c.colorValue || []))})` };
+        }
+        if (tint >= 0 && tint < 100) rgb = rgb.map((x) => 255 - (255 - x) * (tint / 100));
+        return { rgb: rgb.map((x) => Math.round(Math.max(0, Math.min(255, x)))) };
+    } catch (e) {
+        return { rgb: null, note: "error: " + String((e && e.message) || e) };
+    }
 }
 
 // Auto Text Color for every planned page of an open document. Headline (1st
@@ -2795,13 +2872,20 @@ function lowContrastWarnings(label) {
 //   swatches: the designer's selected palette swatches (colorpalette.js)
 //   options.waitForExtension: page indices (0-based) whose image still needs
 //     Image Extension — skipped here; they get their colour after Extend
+//   options.method: contrast model, "apca" (default) | "wcag2" (textcolor.js)
+// The template's own colour per role (stored in the label on first run) is
+// passed as the preferred colour: kept while readable (keptTemplate).
 // Returns [{ layout, roles: [{ role, swatch, score, overall, threshold,
-//   readable, weakest, ranking, error }], error, pending }] — never throws.
+//   readable, keptTemplate, method, weakest, ranking, error }], error,
+//   pending }] — never throws. A module that failed to load is reported as
+//   one { error } entry instead of an empty list, so it shows in the log.
 async function autoTextColorForDocument(doc, plan, swatches, options) {
     const waiting = (options && options.waitForExtension) || new Set();
     const results = [];
+    if (!swatches || !swatches.length) return results;
     const mods = textColorModules();
-    if (!mods || !swatches || !swatches.length) return results;
+    if (!mods) return [{ layout: "all pages", error: "colorpalette.js / textcolor.js failed to load" }];
+    const method = (options && options.method) || mods.color.DEFAULT_METHOD;
     for (const pg of plan.pages) {
         const page = doc.pages.item(pg.index);
         const frame = findHeadlineFrame(page);
@@ -2816,23 +2900,38 @@ async function autoTextColorForDocument(doc, plan, swatches, options) {
             const { image, pageBounds } = await renderPageBehindText(doc, page, [frame]);
             const sx = image.width / (pageBounds[3] - pageBounds[1]), sy = image.height / (pageBounds[2] - pageBounds[0]);
             const toPx = (b) => ({ x: (b[1] - pageBounds[1]) * sx, y: (b[0] - pageBounds[0]) * sy, width: (b[3] - b[1]) * sx, height: (b[2] - b[0]) * sy });
+            // The template's original colour per role: from an earlier run's
+            // label, else the paragraph's colour now (before anything is applied).
+            const previous = readTextColorLabel(frame);
+            const template = Object.assign({}, previous && previous.template);
+            const templateNotes = {};
+            for (const [role, pi] of roleDefs) {
+                if (!template[role]) {
+                    const read = paragraphColorRgb(story.paragraphs.item(pi));
+                    if (read.rgb) template[role] = read.rgb;
+                    else templateNotes[role] = read.note;
+                }
+            }
             const roles = [];
             for (const [role, pi] of roleDefs) {
                 try {
                     const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
                     let size = 0;
                     try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
-                    const best = mods.color.chooseTextColorByZones(zones, swatches, mods.color.readabilityThreshold(size));
+                    const best = mods.color.chooseTextColorByZones(zones, swatches, mods.color.readabilityThreshold(size, method),
+                        { method, preferred: template[role] });
                     if (!best) { roles.push({ role, error: "no visible text lines" }); continue; }
                     applyTextColor(doc, frame, pi, best.swatch);
                     roles.push({ role, swatch: best.swatch.name, swatchId: best.swatch.id, score: best.score, overall: best.overall,
-                        threshold: best.threshold, readable: best.readable, weakest: best.weakest, zones: zones.length,
+                        threshold: best.threshold, readable: best.readable, keptTemplate: best.keptTemplate, method: best.method,
+                        weakest: best.weakest, zones: zones.length,
                         ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
                 } catch (e) {
                     roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
                 }
             }
-            writeTextColorLabel(frame, roles);
+            writeTextColorLabel(frame, roles, Object.keys(template).length ? template : null, method,
+                Object.keys(templateNotes).length ? templateNotes : null);
             results.push({ layout, roles });
         } catch (e) {
             results.push({ layout, error: String((e && e.message) || e) }); // template colour stays
@@ -2846,7 +2945,8 @@ function textColorLogLine(r) {
     if (r.pending) return `${r.layout}: waits for Image Extension`;
     if (r.error) return `${r.layout}: kept template colour (${r.error})`;
     return `${r.layout}: ` + r.roles.map((x) => x.error ? `${x.role} kept template colour (${x.error})`
-        : `${x.role} ${x.swatch} (weakest-zone contrast ${x.score}; overall P10 ${x.overall}; needs ${x.threshold}` +
+        : `${x.role} ${x.swatch}${x.keptTemplate ? (x.readable ? " (template colour, readable)" : " (template colour, near-tie — nothing readable)") : ""} (${x.method === "apca" ? "APCA" : "WCAG 2"} ` +
+            `weakest-zone contrast ${contrastText(x.score, x.method)}; overall P10 ${x.overall}; needs ${contrastText(x.threshold, x.method)}` +
             `${x.readable ? "" : " — LOW"}; ranking ${x.ranking.join(" · ")})`).join(" | ");
 }
 
@@ -2855,7 +2955,7 @@ function textColorWarnings(results) {
     const out = [];
     for (const r of results || []) {
         for (const x of r.roles || []) {
-            if (x.swatch && !x.readable) out.push(`WARNING ${r.layout}: ${lowContrastWarnings({ v: 2, [x.role]: { name: x.swatch, score: x.score, threshold: x.threshold, readable: false } })[0]}`);
+            if (x.swatch && !x.readable) out.push(`WARNING ${r.layout}: ${lowContrastWarnings({ v: 2, method: x.method, [x.role]: { name: x.swatch, score: x.score, threshold: x.threshold, readable: false } })[0]}`);
         }
     }
     return out;
@@ -3050,6 +3150,6 @@ module.exports = {
     addDefaultSubjectFrames, templateState, saveTemplate, textAvoidBounds,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
     pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, linesFromStarts, fitHeadlineToFrame,
-    lowContrastWarnings, textColorWarnings, summarizeTextColors, textColorLogLine,
+    lowContrastWarnings, textColorWarnings, summarizeTextColors, textColorLogLine, colorValueToRgb,
     capsuleMissingWarning, capsuleStatusRecord, previewPlacementForPage, readPlacementGeometry,
 };

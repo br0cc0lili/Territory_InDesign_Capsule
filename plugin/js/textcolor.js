@@ -83,21 +83,86 @@ function chooseTextColor(luminances, candidates) {
 //   zoneP10(c, z)  = P10 { CR(c, p) : p in zone z }
 //   overallP10(c)  = P10 { CR(c, p) : p in all lines of the role }
 //   score(c)       = min(overallP10(c), min_z zoneP10(c, z))
-// Ties: overallP10, then the mean. Readable when score ≥ the WCAG threshold
-// for the text size (readabilityThreshold).
+// Ties: overallP10, then the mean. Readable when score ≥ the threshold for
+// the text size (readabilityThreshold).
+//
+// CONTRAST METHOD. CR is either
+//   "apca"  (default) — APCA Lc (0 … ~106), the perceptual contrast model
+//           drafted for WCAG 3. Scored as |Lc|, so light-on-dark and
+//           dark-on-light count the same way.
+//   "wcag2" — the WCAG 2 ratio (1 … 21) described above.
+// Why APCA: WCAG 2 strongly over-rates black on MID-TONE backgrounds. On the
+// grey-pink winter sky of "Ski- und Snowboardhalter" (avg rgb 170,161,160)
+// WCAG 2 gives black 8.3:1 and white 2.5:1 ("fails"), so Auto Text Color
+// kept switching the template's white headline to black. APCA rates the two
+// about equal there (Lc 54 / 55), which matches what designers see; on
+// clearly light or dark backgrounds both models agree.
 const ZONES = { maxPerLine: 12, widthPerHeight: 2, minPixels: 12 };
 const READABLE = { large: 3.0, normal: 4.5, largeFromPt: 18 };
+// APCA "Bronze" minimums by font size (pt ≈ px in these 72 ppi poster
+// layouts): headlines ≥ 36 → Lc 45, large text ≥ 24 → Lc 60, else Lc 75.
+const READABLE_APCA = [{ fromPt: 36, lc: 45 }, { fromPt: 24, lc: 60 }, { fromPt: 0, lc: 75 }];
+const METHODS = { apca: "apca", wcag2: "wcag2" };
+const DEFAULT_METHOD = METHODS.apca;
+const methodOf = (m) => (m === METHODS.wcag2 ? METHODS.wcag2 : DEFAULT_METHOD);
 
-// PURE. WCAG 2 contrast threshold for text of this size (pt): large text
-// (≥ 18 pt) 3:1, otherwise 4.5:1.
-function readabilityThreshold(pointSize) {
-    return Number(pointSize) >= READABLE.largeFromPt ? READABLE.large : READABLE.normal;
+// APCA-W3 0.0.98G-4g constants (sRGB). github.com/Myndex/apca-w3
+const APCA = { trc: 2.4, r: 0.2126729, g: 0.7151522, b: 0.0721750, normBG: 0.56, normTXT: 0.57, revTXT: 0.62, revBG: 0.65,
+    blkThrs: 0.022, blkClmp: 1.414, scale: 1.14, offset: 0.027, loClip: 0.1, deltaYmin: 0.0005 };
+
+// PURE. APCA screen luminance Y of an sRGB colour (0–255), soft-clamped
+// near black as APCA specifies.
+function apcaY(r, g, b) {
+    const y = APCA.r * Math.pow(r / 255, APCA.trc) + APCA.g * Math.pow(g / 255, APCA.trc) + APCA.b * Math.pow(b / 255, APCA.trc);
+    return y > APCA.blkThrs ? y : y + Math.pow(APCA.blkThrs - y, APCA.blkClmp);
+}
+
+// PURE. APCA lightness contrast Lc of text (Y) on background (Y): positive
+// for dark text on light, negative for light text on dark; 0 when too close.
+function apcaContrast(txtY, bgY) {
+    if (Math.abs(bgY - txtY) < APCA.deltaYmin) return 0;
+    if (bgY > txtY) {
+        const s = (Math.pow(bgY, APCA.normBG) - Math.pow(txtY, APCA.normTXT)) * APCA.scale;
+        return s < APCA.loClip ? 0 : (s - APCA.offset) * 100;
+    }
+    const s = (Math.pow(bgY, APCA.revBG) - Math.pow(txtY, APCA.revTXT)) * APCA.scale;
+    return s > -APCA.loClip ? 0 : (s + APCA.offset) * 100;
+}
+
+// PURE. Minimum readable score for text of this size (pt), in the units of
+// `method`: WCAG 2 — large text (≥ 18 pt) 3:1, otherwise 4.5:1; APCA — see
+// READABLE_APCA.
+function readabilityThreshold(pointSize, method) {
+    const size = Number(pointSize) || 0;
+    if (methodOf(method) === METHODS.wcag2) return size >= READABLE.largeFromPt ? READABLE.large : READABLE.normal;
+    return READABLE_APCA.find((t) => size >= t.fromPt).lc;
+}
+
+// PURE. Like sampleLuminances, but returns BOTH per-pixel values a zone
+// needs: { lum: WCAG relative luminance, ys: APCA screen luminance }.
+function sampleBackground(image, box) {
+    const x0 = Math.max(0, Math.floor(box.x)), y0 = Math.max(0, Math.floor(box.y));
+    const x1 = Math.min(image.width, Math.ceil(box.x + box.width)), y1 = Math.min(image.height, Math.ceil(box.y + box.height));
+    const w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0) return { lum: new Float32Array(0), ys: new Float32Array(0) };
+    const step = Math.max(1, Math.ceil(Math.sqrt((w * h) / MAX_SAMPLES)));
+    const lum = [], ys = [];
+    for (let y = y0; y < y1; y += step) {
+        for (let x = x0; x < x1; x += step) {
+            const i = (y * image.width + x) * 4;
+            const r = image.data[i], g = image.data[i + 1], b = image.data[i + 2];
+            lum.push(relativeLuminance(r, g, b));
+            ys.push(apcaY(r, g, b));
+        }
+    }
+    return { lum: Float32Array.from(lum), ys: Float32Array.from(ys) };
 }
 
 // PURE. The zones of a role's lines: each line box ({ x, y, width, height },
 // image pixels) cut into n = clamp(round(width / (2 × height)), 1, 12)
 // equal horizontal zones (fewer if a zone would have < minPixels pixels).
-// Returns [{ line, zone, lum: Float32Array }] (empty zones dropped).
+// Returns [{ line, zone, lum: Float32Array, ys: Float32Array }] (empty
+// zones dropped). lum feeds WCAG 2, ys feeds APCA.
 function sampleZones(image, lineBoxes) {
     const zones = [];
     (lineBoxes || []).forEach((b, line) => {
@@ -105,21 +170,35 @@ function sampleZones(image, lineBoxes) {
         let n = Math.max(1, Math.min(ZONES.maxPerLine, Math.round(b.width / (ZONES.widthPerHeight * b.height))));
         while (n > 1 && (b.width / n) * b.height < ZONES.minPixels) n--;
         for (let k = 0; k < n; k++) {
-            const lum = sampleLuminances(image, { x: b.x + (k * b.width) / n, y: b.y, width: b.width / n, height: b.height });
-            if (lum.length) zones.push({ line, zone: k, lum });
+            const s = sampleBackground(image, { x: b.x + (k * b.width) / n, y: b.y, width: b.width / n, height: b.height });
+            if (s.lum.length) zones.push({ line, zone: k, lum: s.lum, ys: s.ys });
         }
     });
     return zones;
 }
 
+// PURE. Per-pixel contrast of one text colour, in `method` units:
+// (background value) → score. Higher is always better.
+function contrastFn(rgb, method) {
+    if (methodOf(method) === METHODS.wcag2) {
+        const lt = relativeLuminance(rgb[0], rgb[1], rgb[2]);
+        return { key: "lum", fn: (lb) => contrastRatio(lt, lb) };
+    }
+    const yt = apcaY(rgb[0], rgb[1], rgb[2]);
+    return { key: "ys", fn: (yb) => Math.abs(apcaContrast(yt, yb)) };
+}
+
 // PURE. One colour (rgb 0–255) against a role's zones:
-// { score, overall, mean, weakest: { line, zone, p10 } }.
-function scoreZones(zones, rgb) {
-    const lt = relativeLuminance(rgb[0], rgb[1], rgb[2]);
+// { score, overall, mean, weakest: { line, zone, p10 } } in `method` units
+// (default APCA).
+function scoreZones(zones, rgb, method) {
+    const { key, fn } = contrastFn(rgb, method);
     const all = [];
     let weakest = null;
     for (const z of zones) {
-        const cr = Array.from(z.lum, (lb) => contrastRatio(lt, lb)).sort((a, b) => a - b);
+        const values = z[key] || (key === "ys" ? null : z.lum);
+        if (!values) throw new Error("zones were sampled without APCA values — use sampleZones()");
+        const cr = Array.from(values, fn).sort((a, b) => a - b);
         const p10 = percentile(cr, SCORE_PERCENTILE);
         if (!weakest || p10 < weakest.p10) weakest = { line: z.line, zone: z.zone, p10 };
         for (const v of cr) all.push(v);
@@ -132,18 +211,57 @@ function scoreZones(zones, rgb) {
         weakest: weakest && { line: weakest.line, zone: weakest.zone, p10: r2(weakest.p10) } };
 }
 
-// PURE. The best candidate swatch for one role, or null (no zones / no
+// Template colour preference: a selected swatch "is" the template's own text
+// colour when their sRGB values are this close (Euclidean, 0–255 per channel;
+// covers CMYK ↔ RGB rounding of the same brand colour, e.g. Paper vs White).
+// nearTie: when NO selected colour is readable, the template colour is still
+// kept if it scores within this margin of the best (method units) — the
+// "winner" would be just as unreadable, and flipping white ↔ black between
+// layouts of one product for a 1-point difference looks like a bug. The
+// Review warning stays either way.
+const PREFER = { maxRgbDistance: 24, nearTie: { apca: 5, wcag2: 0.3 } };
+
+const rgbDistance = (a, b) => Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
+
+// PURE. The selected swatch that matches the template colour (nearest within
+// PREFER.maxRgbDistance), or null.
+function matchingSwatch(candidates, rgb) {
+    if (!Array.isArray(rgb) || rgb.length < 3) return null;
+    let best = null;
+    for (const s of candidates || []) {
+        if (!s || !s.rgb) continue;
+        const d = rgbDistance(s.rgb, rgb);
+        if (d <= PREFER.maxRgbDistance && (!best || d < best.d)) best = { s, d };
+    }
+    return best ? best.s : null;
+}
+
+// PURE. The candidate swatch for one role, or null (no zones / no
 // candidates): { swatch, score, overall, mean, weakest, threshold, readable,
-// ranking: [{ swatch, score, overall, mean }] }. The best is returned even
-// when it isn't readable (readable: false) — the caller applies it AND warns.
-function chooseTextColorByZones(zones, candidates, threshold) {
+// method, keptTemplate, ranking: [{ swatch, score, overall, mean }] }.
+//   threshold: minimum readable score, in `method` units
+//   options.method: "apca" (default) | "wcag2"
+//   options.preferred: the template's own text colour (rgb 0–255). When a
+//     selected swatch matches it AND that swatch is readable, it is kept even
+//     if another swatch scores higher — the designer's colour wins unless it
+//     fails (keptTemplate: true). Also kept when nothing is readable and it is
+//     within PREFER.nearTie of the best. Otherwise the best-scoring swatch.
+// The result is returned even when nothing is readable (readable: false) —
+// the caller applies it AND warns.
+function chooseTextColorByZones(zones, candidates, threshold, options) {
     if (!zones || !zones.length) return null;
+    const method = methodOf(options && options.method);
     const ranked = (candidates || []).filter((s) => s && s.rgb)
-        .map((swatch) => Object.assign({ swatch }, scoreZones(zones, swatch.rgb)))
+        .map((swatch) => Object.assign({ swatch }, scoreZones(zones, swatch.rgb, method)))
         .sort((a, b) => b.score - a.score || b.overall - a.overall || b.mean - a.mean);
     if (!ranked.length) return null;
-    const t = threshold || READABLE.normal;
-    return Object.assign({ ranking: ranked, threshold: t, readable: ranked[0].score >= t }, ranked[0]);
+    const t = threshold || readabilityThreshold(0, method);
+    const tmpl = matchingSwatch(ranked.map((r) => r.swatch), options && options.preferred);
+    const tr = tmpl && ranked.find((r) => r.swatch === tmpl);
+    const kept = tr && (tr.score >= t || (ranked[0].score < t && ranked[0].score - tr.score <= PREFER.nearTie[method])) ? tr : null;
+    const pick = kept || ranked[0];
+    return Object.assign({ ranking: ranked, threshold: t, method, keptTemplate: !!kept && pick !== ranked[0],
+        readable: pick.score >= t }, pick);
 }
 
 // Decodes a JPEG (ArrayBuffer / Uint8Array) to { width, height, data: RGBA }.
@@ -157,4 +275,5 @@ function decodeJpeg(bytes) {
 }
 
 module.exports = { relativeLuminance, contrastRatio, sampleLuminances, rankColors, chooseTextColor, decodeJpeg, SCORE_PERCENTILE,
-    readabilityThreshold, sampleZones, scoreZones, chooseTextColorByZones, READABLE, ZONES };
+    readabilityThreshold, sampleZones, scoreZones, chooseTextColorByZones, READABLE, ZONES,
+    apcaY, apcaContrast, matchingSwatch, READABLE_APCA, METHODS, DEFAULT_METHOD, PREFER };

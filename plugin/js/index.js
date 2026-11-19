@@ -1431,7 +1431,9 @@ function renderPalette() {
     }
     el.btnPalette.textContent = "Change…";
     const n = paletteSelected.length;
-    el.palettePath.textContent = `${palette.name} · ${n ? n + " selected" : "none selected — template colours kept"}`;
+    // "none selected" must not read like "these are in use": the swatches
+    // below are only SHOWN until clicked (a selected one gets a blue border).
+    el.palettePath.textContent = `${palette.name} · ${n ? n + " selected (blue border)" : "none selected — click the colours Auto Text Color may use; until then template colours are kept"}`;
     const list = paletteExpanded ? palette.swatches : palette.swatches.slice(0, PALETTE_VISIBLE);
     for (const sw of list) {
         const b = document.createElement("div");
