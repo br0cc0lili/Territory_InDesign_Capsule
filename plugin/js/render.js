@@ -1667,6 +1667,13 @@ async function inspectTemplates(templatePaths) {
 
 // ---------- run bookkeeping (log lines, counts, progress) ----------
 
+// PURE. One CSV cell for the plugin's simple logs: commas become ";" (as
+// before) and line breaks become " · " — a message with a line break used
+// to split its row in two (e.g. "Template detected … \n· Red subject frame").
+function csvCell(v) {
+    return String(v == null ? "" : v).replace(/,/g, ";").replace(/\s*[\r\n\u2028\u2029]+\s*(?:·\s*)?/g, " · ");
+}
+
 function makeRun(totalOps, onProgress) {
     const run = {
         logLines: ["timestamp,headline,page_label,output_file,status,message"],
@@ -1676,7 +1683,7 @@ function makeRun(totalOps, onProgress) {
         done: 0,
         total: totalOps,
     };
-    const csv = (v) => String(v == null ? "" : v).replace(/,/g, ";");
+    const csv = csvCell;
     run.line = (headline, label, outPath, status, message) => {
         run.logLines.push([new Date().toISOString(), csv(headline), csv(label), csv(outPath), status, csv(message)].join(","));
     };
@@ -2592,10 +2599,15 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
     // Extension for the pages that waited at Generate. A page that is still
     // not covered (its extension failed / wasn't possible) keeps waiting.
     let textColor = null;
+    const textColorLog = []; // one JSON line per page, written with the other log lines below
     const tcSwatches = options && options.textColor && options.textColor.swatches;
     if (appliedAny && tcSwatches && tcSwatches.length) {
         const waitForExtension = pagesAwaitingExtension(pages.filter((p) => !p.applied).map((p) => p.record));
-        try { textColor = summarizeTextColors(await autoTextColorForDocument(doc, plan, tcSwatches, { waitForExtension })); } catch (e) {}
+        let tc = [];
+        try { tc = await autoTextColorForDocument(doc, plan, tcSwatches, { waitForExtension }); }
+        catch (e) { tc = [{ layout: "all pages", error: String((e && e.message) || e) }]; } // never fails the extension
+        textColor = summarizeTextColors(tc);
+        for (const r of tc) textColorLog.push(JSON.stringify({ product: headline, kind: "textColor", layout: r.layout, line: textColorLogLine(r) }));
         // The new colours (and any low-contrast warning) are part of the check.
         if (textColor) check = checkProductPages(doc, plan);
     }
@@ -2623,7 +2635,7 @@ async function extendOpenProduct(doc, item, outputRootPath, mode, onProgress, op
         originalWorkingTarget: p.meta ? (p.meta.originalWorkingTarget || p.meta.fullResolutionTarget || null) : null,
         fireflyWorkingTarget: p.meta ? p.meta.target : null, workingScale: p.meta ? p.meta.workingScale : null,
         cacheHit: p.cacheHit, applied: p.applied, error: p.error || "",
-    }));
+    })).concat(textColorLog);
     return {
         pages: pages.map((p) => ({ layout: p.record.layout, status: p.record.status, applied: p.applied, error: p.error })),
         generations: todo.map((p) => ({ layout: p.record.layout, planId: p.plan.id, generationPlan: p.meta ? p.meta.planId : null,
@@ -2670,6 +2682,10 @@ async function setExtensionVisible(item, visible) {
 // only choice is which swatches are allowed (Step 1).
 
 const TEXT_COLOR_LABEL = "posterBatch.textColor";
+// sameColorForRoles: Headline and Subline always get the SAME colour, chosen
+// for both together (textcolor.js chooseTextColorForRoles). false = each
+// role chooses on its own (the behaviour before 19 Nov 2026).
+const TEXT_COLOR_CONFIG = { sameColorForRoles: true };
 const TEXT_COLOR_RESOLUTION = 36; // dpi of the analysis render
 
 let _textColorMods = null;
@@ -2770,20 +2786,92 @@ function applyTextColor(doc, frame, paraIndex, swatch) {
 
 // The choice per role is recorded on the frame (script label): traceability,
 // and pageWarnings() keeps flagging low contrast at Preview / Commit.
-//   { v: 2, headline: { swatch, name, score, threshold, readable }, subline: … }
-function writeTextColorLabel(frame, roles) {
-    const label = { v: 2 };
+//   { v: 2, method, template: { headline: rgb, subline: rgb },
+//     headline: { swatch, name, score, threshold, readable, keptTemplate }, subline: … }
+// `template` is the template's ORIGINAL text colour, captured the first time
+// the page is coloured, so later runs (after Extend) still prefer the
+// designer's colour rather than whatever Auto Text Color applied before.
+function writeTextColorLabel(frame, roles, template, method, templateNotes) {
+    const label = { v: 2, method: method || undefined, template: template || undefined, templateNotes: templateNotes || undefined };
     for (const r of roles) {
-        if (r.swatch) label[r.role] = { swatch: r.swatchId, name: r.swatch, score: r.score, threshold: r.threshold, readable: r.readable };
+        if (r.swatch) label[r.role] = { swatch: r.swatchId, name: r.swatch, score: r.score, threshold: r.threshold, readable: r.readable,
+            keptTemplate: r.keptTemplate || undefined };
     }
     try { frame.insertLabel(TEXT_COLOR_LABEL, JSON.stringify(label)); } catch (e) {}
+}
+
+function readTextColorLabel(frame) {
+    try { return JSON.parse(frame.extractLabel(TEXT_COLOR_LABEL) || "null"); } catch (e) { return null; }
+}
+
+// PURE. A score with its unit: "Lc 52" (APCA) or "4.2:1" (WCAG 2).
+function contrastText(score, method) {
+    return method === "apca" ? `Lc ${score}` : `${score}:1`;
 }
 
 // PURE. "low text contrast" warnings from a stored label (v2), [] otherwise.
 function lowContrastWarnings(label) {
     if (!label || label.v !== 2) return [];
     return ["headline", "subline"].filter((k) => label[k] && label[k].readable === false)
-        .map((k) => `low text contrast — ${k} ${label[k].name} reaches ${label[k].score}:1 in its weakest part (needs ${label[k].threshold}:1); best of the selected colours`);
+        .map((k) => `low text contrast — ${k} ${label[k].name} reaches ${contrastText(label[k].score, label.method)} in its weakest part (needs ${contrastText(label[k].threshold, label.method)}); best of the selected colours`);
+}
+
+// PURE. sRGB (0–255) for an InDesign colour's space + colorValue, or null.
+// `space` is matched by name as well as by enum value: UXP returns enums in
+// different shapes across InDesign builds (object, number, string), so an
+// `===` against ColorSpace.RGB alone is not reliable.
+function colorValueToRgb(space, values, enums, toRgb) {
+    const v = Array.from(values || [], Number);
+    if (!v.length || !v.every(isFinite)) return null;
+    // A primitive (number / string) form of an enum, or null for a plain
+    // object — String() of any two objects is the same "[object Object]".
+    const prim = (x) => {
+        if (x === null || x === undefined) return null;
+        const p = typeof x === "object" && typeof x.valueOf === "function" ? x.valueOf() : x;
+        return typeof p === "object" ? null : String(p);
+    };
+    const is = (k) => {
+        const e = enums && enums[k];
+        if (e !== undefined) {
+            if (space === e) return true;
+            const a = prim(space), b = prim(e);
+            if (a !== null && a === b) return true;
+        }
+        const p = prim(space);
+        return p !== null && new RegExp("(^|[^A-Z])" + k + "([^A-Z]|$)", "i").test(p);
+    };
+    if (is("CMYK") || (!is("RGB") && !is("LAB") && v.length === 4)) return toRgb("CMYK", v.map((x) => x / 100));
+    if (is("LAB")) return toRgb("LAB", [v[0] / 100, v[1], v[2]]);
+    if (is("RGB") || (v.length === 3 && v.every((x) => x >= 0 && x <= 255))) return v.slice(0, 3);
+    return null;
+}
+
+// The paragraph's CURRENT fill colour as sRGB (0–255): { rgb } or
+// { rgb: null, note } saying why not (None, gradient, unknown space, error),
+// so a failure shows up in the label instead of disappearing.
+// Paper → white; a tint is mixed with white.
+function paragraphColorRgb(para) {
+    try {
+        let c = para.fillColor;
+        if (!c || c.isValid === false) return { rgb: null, note: "no fill colour" };
+        let tint = Number(para.fillTint);
+        const kind = String((c.constructor && c.constructor.name) || "");
+        if (kind === "Tint") { tint = Number(c.tintValue); c = c.baseColor; }
+        if (kind === "Gradient") return { rgb: null, note: "gradient fill" };
+        const name = String(c.name || "");
+        if (name === "None") return { rgb: null, note: "fill None" };
+        let rgb = null;
+        if (name === "Paper") rgb = [255, 255, 255];
+        else {
+            const { ColorSpace } = indesign();
+            rgb = colorValueToRgb(c.space, c.colorValue, ColorSpace, textColorModules().palette.toRgb);
+            if (!rgb) return { rgb: null, note: `unreadable colour "${name}" (${kind}, space ${String(c.space)}, values ${JSON.stringify(Array.from(c.colorValue || []))})` };
+        }
+        if (tint >= 0 && tint < 100) rgb = rgb.map((x) => 255 - (255 - x) * (tint / 100));
+        return { rgb: rgb.map((x) => Math.round(Math.max(0, Math.min(255, x)))) };
+    } catch (e) {
+        return { rgb: null, note: "error: " + String((e && e.message) || e) };
+    }
 }
 
 // Auto Text Color for every planned page of an open document. Headline (1st
@@ -2795,13 +2883,20 @@ function lowContrastWarnings(label) {
 //   swatches: the designer's selected palette swatches (colorpalette.js)
 //   options.waitForExtension: page indices (0-based) whose image still needs
 //     Image Extension — skipped here; they get their colour after Extend
+//   options.method: contrast model, "apca" (default) | "wcag2" (textcolor.js)
+// The template's own colour per role (stored in the label on first run) is
+// passed as the preferred colour: kept while readable (keptTemplate).
 // Returns [{ layout, roles: [{ role, swatch, score, overall, threshold,
-//   readable, weakest, ranking, error }], error, pending }] — never throws.
+//   readable, keptTemplate, method, weakest, ranking, error }], error,
+//   pending }] — never throws. A module that failed to load is reported as
+//   one { error } entry instead of an empty list, so it shows in the log.
 async function autoTextColorForDocument(doc, plan, swatches, options) {
     const waiting = (options && options.waitForExtension) || new Set();
     const results = [];
+    if (!swatches || !swatches.length) return results;
     const mods = textColorModules();
-    if (!mods || !swatches || !swatches.length) return results;
+    if (!mods) return [{ layout: "all pages", error: "colorpalette.js / textcolor.js failed to load" }];
+    const method = (options && options.method) || mods.color.DEFAULT_METHOD;
     for (const pg of plan.pages) {
         const page = doc.pages.item(pg.index);
         const frame = findHeadlineFrame(page);
@@ -2816,23 +2911,71 @@ async function autoTextColorForDocument(doc, plan, swatches, options) {
             const { image, pageBounds } = await renderPageBehindText(doc, page, [frame]);
             const sx = image.width / (pageBounds[3] - pageBounds[1]), sy = image.height / (pageBounds[2] - pageBounds[0]);
             const toPx = (b) => ({ x: (b[1] - pageBounds[1]) * sx, y: (b[0] - pageBounds[0]) * sy, width: (b[3] - b[1]) * sx, height: (b[2] - b[0]) * sy });
-            const roles = [];
+            // The template's original colour per role: from an earlier run's
+            // label, else the paragraph's colour now (before anything is applied).
+            const previous = readTextColorLabel(frame);
+            const template = Object.assign({}, previous && previous.template);
+            const templateNotes = {};
             for (const [role, pi] of roleDefs) {
-                try {
-                    const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
-                    let size = 0;
-                    try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
-                    const best = mods.color.chooseTextColorByZones(zones, swatches, mods.color.readabilityThreshold(size));
-                    if (!best) { roles.push({ role, error: "no visible text lines" }); continue; }
-                    applyTextColor(doc, frame, pi, best.swatch);
-                    roles.push({ role, swatch: best.swatch.name, swatchId: best.swatch.id, score: best.score, overall: best.overall,
-                        threshold: best.threshold, readable: best.readable, weakest: best.weakest, zones: zones.length,
-                        ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
-                } catch (e) {
-                    roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
+                if (!template[role]) {
+                    const read = paragraphColorRgb(story.paragraphs.item(pi));
+                    if (read.rgb) template[role] = read.rgb;
+                    else templateNotes[role] = read.note;
                 }
             }
-            writeTextColorLabel(frame, roles);
+            const roles = [];
+            if (TEXT_COLOR_CONFIG.sameColorForRoles) {
+                // ONE colour for headline + subline (team decision): measure
+                // every role, choose jointly, apply the same swatch to all.
+                const measured = [];
+                for (const [role, pi] of roleDefs) {
+                    try {
+                        const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
+                        let size = 0;
+                        try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
+                        if (!zones.length) { roles.push({ role, error: "no visible text lines" }); continue; }
+                        measured.push({ role, pi, zones, threshold: mods.color.readabilityThreshold(size, method) });
+                    } catch (e) {
+                        roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
+                    }
+                }
+                const pick = mods.color.chooseTextColorForRoles(measured, swatches,
+                    { method, preferred: template.headline || template.subline });
+                if (pick) {
+                    const ranking = pick.ranking.slice(0, 3).map((x) => `${x.swatch.name} margin ${x.margin}`);
+                    for (const m of measured) {
+                        const s = pick.roles.find((x) => x.role === m.role);
+                        try {
+                            applyTextColor(doc, frame, m.pi, pick.swatch);
+                            roles.push({ role: m.role, swatch: pick.swatch.name, swatchId: pick.swatch.id, score: s.score, overall: s.overall,
+                                threshold: s.threshold, readable: s.readable, keptTemplate: pick.keptTemplate, method: pick.method,
+                                weakest: s.weakest, zones: m.zones.length, shared: true, ranking });
+                        } catch (e) {
+                            roles.push({ role: m.role, error: String((e && e.message) || e) });
+                        }
+                    }
+                }
+            } else {
+                for (const [role, pi] of roleDefs) {
+                    try {
+                        const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
+                        let size = 0;
+                        try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
+                        const best = mods.color.chooseTextColorByZones(zones, swatches, mods.color.readabilityThreshold(size, method),
+                            { method, preferred: template[role] });
+                        if (!best) { roles.push({ role, error: "no visible text lines" }); continue; }
+                        applyTextColor(doc, frame, pi, best.swatch);
+                        roles.push({ role, swatch: best.swatch.name, swatchId: best.swatch.id, score: best.score, overall: best.overall,
+                            threshold: best.threshold, readable: best.readable, keptTemplate: best.keptTemplate, method: best.method,
+                            weakest: best.weakest, zones: zones.length,
+                            ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
+                    } catch (e) {
+                        roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
+                    }
+                }
+            }
+            writeTextColorLabel(frame, roles, Object.keys(template).length ? template : null, method,
+                Object.keys(templateNotes).length ? templateNotes : null);
             results.push({ layout, roles });
         } catch (e) {
             results.push({ layout, error: String((e && e.message) || e) }); // template colour stays
@@ -2846,7 +2989,8 @@ function textColorLogLine(r) {
     if (r.pending) return `${r.layout}: waits for Image Extension`;
     if (r.error) return `${r.layout}: kept template colour (${r.error})`;
     return `${r.layout}: ` + r.roles.map((x) => x.error ? `${x.role} kept template colour (${x.error})`
-        : `${x.role} ${x.swatch} (weakest-zone contrast ${x.score}; overall P10 ${x.overall}; needs ${x.threshold}` +
+        : `${x.role} ${x.swatch}${x.shared ? " [same colour for headline + subline]" : ""}${x.keptTemplate ? (x.readable ? " (template colour, readable)" : " (template colour, near-tie — nothing readable)") : ""} (${x.method === "apca" ? "APCA" : "WCAG 2"} ` +
+            `weakest-zone contrast ${contrastText(x.score, x.method)}; overall P10 ${x.overall}; needs ${contrastText(x.threshold, x.method)}` +
             `${x.readable ? "" : " — LOW"}; ranking ${x.ranking.join(" · ")})`).join(" | ");
 }
 
@@ -2855,7 +2999,7 @@ function textColorWarnings(results) {
     const out = [];
     for (const r of results || []) {
         for (const x of r.roles || []) {
-            if (x.swatch && !x.readable) out.push(`WARNING ${r.layout}: ${lowContrastWarnings({ v: 2, [x.role]: { name: x.swatch, score: x.score, threshold: x.threshold, readable: false } })[0]}`);
+            if (x.swatch && !x.readable) out.push(`WARNING ${r.layout}: ${lowContrastWarnings({ v: 2, method: x.method, [x.role]: { name: x.swatch, score: x.score, threshold: x.threshold, readable: false } })[0]}`);
         }
     }
     return out;
@@ -3044,12 +3188,111 @@ async function writeLog(logLines, logPath) {
     await fileEntry.write(logLines.join("\n") + "\n");
 }
 
+// ---------- generation history (generation_log.csv + generation_history.csv) ----------
+//
+// Every Generate / Regenerate / Apply is ADDED to generation_log.csv — same
+// six columns as before, plus run_id and run_type at the end. So the file
+// keeps the full history, and each row says which run it came from.
+// Size: when the file would grow past GENERATION_LOG.maxBytes, the existing
+// rows are moved to logs/generation_log_<first run>_to_<last run>.csv and a
+// new generation_log.csv starts. Nothing is deleted.
+// Catalogue: generation_history.csv has ONE row per run (time, type,
+// products, counts) — the short overview; run_id finds the detail rows.
+const GENERATION_LOG = {
+    file: "generation_log.csv",
+    history: "generation_history.csv",
+    archiveFolder: "logs",
+    maxBytes: 5 * 1024 * 1024,
+    runColumns: ["run_id", "run_type"],
+    historyHeader: "run_id,started,run_type,products,generated,failed,with_warnings,log_rows",
+};
+
+// PURE. "20261119-161532-042" (local time, to the millisecond) — sorts by time.
+function newRunId(date) {
+    const d = date || new Date();
+    const p = (n, w) => String(n).padStart(w || 2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`;
+}
+
+// PURE. A run's log lines (logLines[0] = header) with run_id + run_type
+// added to every line: { header, rows: [string] }.
+function tagRunLines(logLines, runId, runType) {
+    const lines = logLines || [];
+    return {
+        header: (lines[0] || "timestamp,headline,page_label,output_file,status,message") + "," + GENERATION_LOG.runColumns.join(","),
+        rows: lines.slice(1).filter((l) => String(l).length).map((l) => `${l},${csvCell(runId)},${csvCell(runType)}`),
+    };
+}
+
+// PURE. How to add `rows` to the existing log text (null = no file yet):
+// { text, archive: null | { text, name, reason } }. The existing rows are
+// archived when the header differs (a file from before this change) or the
+// file would grow past maxBytes.
+function planGenerationLogAppend(existing, header, rows, newRunIdValue, maxBytes) {
+    const add = rows.length ? rows.join("\n") + "\n" : "";
+    if (existing === null || existing === undefined || !String(existing).trim()) return { text: header + "\n" + add, archive: null };
+    const old = String(existing).replace(/\n?$/, "\n");
+    const lines = old.split("\n").filter((l) => l.length);
+    const limit = maxBytes || GENERATION_LOG.maxBytes;
+    let reason = "";
+    if (lines[0] !== header) reason = "older log format";
+    else if (old.length + add.length > limit) reason = `over ${Math.round(limit / 1024 / 1024)} MB`;
+    if (!reason) return { text: old + add, archive: null };
+    // run ids of the archived rows (the next-to-last column), for the file name
+    const ids = reason === "older log format" ? [] : lines.slice(1).map((l) => l.split(",").slice(-2)[0]).filter(Boolean);
+    const name = ids.length ? `generation_log_${ids[0]}_to_${ids[ids.length - 1]}.csv` : `generation_log_before_${newRunIdValue}.csv`;
+    return { text: header + "\n" + add, archive: { text: old, name, reason } };
+}
+
+// PURE. The generation_history.csv row of one run.
+function historyLine(runId, started, runType, products, result, logRows) {
+    const generated = (result && result.generated) || [];
+    const failed = result && Array.isArray(result.failed) ? result.failed.length : Number((result && result.errorCount) || 0);
+    const withWarnings = generated.filter((g) => g && g.warnings && g.warnings.length).length;
+    return [runId, started, runType, (products || []).map(csvCell).join(" | "), generated.length, failed, withWarnings, logRows]
+        .map(csvCell).join(",");
+}
+
+async function readTextIfExists(path) {
+    try {
+        const entry = await require("uxp").storage.localFileSystem.getEntryWithUrl(fileUrl(path));
+        return String(await entry.read());
+    } catch (e) {
+        return null;
+    }
+}
+
+// Adds one run to generation_log.csv and generation_history.csv in the
+// output folder. Returns { runId, rows, archived: name | null, reason }.
+// Throws only if a file can't be written (the caller reports it).
+async function recordGenerationRun(outputRoot, result, runType, products) {
+    const root = String(outputRoot).replace(/\/+$/, "");
+    const runId = newRunId();
+    const started = new Date().toISOString();
+    const { header, rows } = tagRunLines(result && result.logLines, runId, runType);
+    const logPath = `${root}/${GENERATION_LOG.file}`;
+    const plan = planGenerationLogAppend(await readTextIfExists(logPath), header, rows, runId);
+    if (plan.archive) {
+        // Archive first: if this fails, the existing log is left untouched.
+        await ensureFolder(`${root}/${GENERATION_LOG.archiveFolder}`);
+        await writeLog([plan.archive.text.replace(/\n$/, "")], `${root}/${GENERATION_LOG.archiveFolder}/${plan.archive.name}`);
+    }
+    await writeLog([plan.text.replace(/\n$/, "")], logPath);
+    const histPath = `${root}/${GENERATION_LOG.history}`;
+    const hist = await readTextIfExists(histPath);
+    const line = historyLine(runId, started, runType, products, result, rows.length);
+    const histText = hist && hist.trim() ? hist.replace(/\n?$/, "\n") + line : GENERATION_LOG.historyHeader + "\n" + line;
+    await writeLog([histText], histPath);
+    return { runId, rows: rows.length, archived: plan.archive ? plan.archive.name : null, reason: plan.archive ? plan.archive.reason : "" };
+}
+
 module.exports = {
     checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
     isInddOpen, inddOpenState, closeIndd, backupIndds, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
     addDefaultSubjectFrames, templateState, saveTemplate, textAvoidBounds,
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
     pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, linesFromStarts, fitHeadlineToFrame,
-    lowContrastWarnings, textColorWarnings, summarizeTextColors, textColorLogLine,
+    lowContrastWarnings, textColorWarnings, summarizeTextColors, textColorLogLine, colorValueToRgb,
+    csvCell, newRunId, tagRunLines, planGenerationLogAppend, historyLine, recordGenerationRun, GENERATION_LOG,
     capsuleMissingWarning, capsuleStatusRecord, previewPlacementForPage, readPlacementGeometry,
 };

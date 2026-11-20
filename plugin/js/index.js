@@ -392,6 +392,10 @@ function hideProgress() {
 function summarize(headline, result, channel, extraLine) {
     const lines = [headline];
     if (extraLine) lines.push(extraLine);
+    // generation_log.csv problems / archiving (runGenerate → recordGenerationRun)
+    const rec = result && result.logRecord;
+    if (rec && rec.error) lines.push("⚠ " + rec.error);
+    else if (rec && rec.archived) lines.push(`Log: the earlier generation_log.csv rows (${rec.reason}) were moved to logs/${rec.archived}`);
     const failures = (result && result.failures) || [];
     for (const f of failures.slice(0, 5)) lines.push(`✗ ${f.headline} — ${f.message}`);
     if (failures.length > 5) lines.push(`…and ${failures.length - 5} more — see the log.`);
@@ -1272,7 +1276,7 @@ async function applyCapsuleEdit(rec, result, layouts) {
         // closeIndd refuses an INDD that got unsaved changes since the check above.
         for (const r of open) await render.closeIndd(products.get(r).inddPath);
         const extendedPaths = extended.map((r) => products.get(r).inddPath.toLowerCase());
-        const res = await runGenerate(affected, `Applying the subject change to ${affected.length} product(s)…`);
+        const res = await runGenerate(affected, `Applying the subject change to ${affected.length} product(s)…`, "apply_subject_change");
         for (const g of res.generated) {
             if (extendedPaths.indexOf(String(g.inddPath).toLowerCase()) === -1) continue;
             const s = getStatus(g.inddPath) || {};
@@ -1431,7 +1435,9 @@ function renderPalette() {
     }
     el.btnPalette.textContent = "Change…";
     const n = paletteSelected.length;
-    el.palettePath.textContent = `${palette.name} · ${n ? n + " selected" : "none selected — template colours kept"}`;
+    // "none selected" must not read like "these are in use": the swatches
+    // below are only SHOWN until clicked (a selected one gets a blue border).
+    el.palettePath.textContent = `${palette.name} · ${n ? n + " selected (blue border)" : "none selected — click the colours Auto Text Color may use; until then template colours are kept"}`;
     const list = paletteExpanded ? palette.swatches : palette.swatches.slice(0, PALETTE_VISIBLE);
     for (const sw of list) {
         const b = document.createElement("div");
@@ -2025,7 +2031,11 @@ function recordGeneration(result) {
     }
 }
 
-async function runGenerate(rows, title) {
+// runType: "generate" (Generate All) | "regenerate" (one product, ⋯) |
+// "apply_subject_change" (Edit Subject Placement → Save & Regenerate).
+// Every run is ADDED to generation_log.csv (with run_id + run_type) and
+// catalogued in generation_history.csv — see render.recordGenerationRun.
+async function runGenerate(rows, title, runType) {
     setBusy(true);
     startProgress(channels.generate, "Generating", title);
     try {
@@ -2033,6 +2043,12 @@ async function runGenerate(rows, title) {
         const result = await render.generateIndds(rows, templatePaths, outputEntry.nativePath,
             progressTo(channels.generate), { placementMode: placementMode(), useChoices: FEATURES.chooseSubject, textColor: textColorOptions(),
                 subjectSource: subjectSource() });
+        try {
+            result.logRecord = await render.recordGenerationRun(outputEntry.nativePath, result, runType || "generate", rows.map((r) => r.headline));
+        } catch (e) {
+            // Never fail a generation because of its log — but say so.
+            result.logRecord = { error: "generation_log.csv could not be written: " + errorText(e) };
+        }
         recordGeneration(result);
         await refreshProducts();
         return result;
@@ -2059,9 +2075,7 @@ el.btnGenerate.addEventListener("click", async () => {
         if (go !== "go") return;
     }
     try {
-        const result = await runGenerate(manifestRows, "Generating INDDs…");
-        const logPath = outputEntry.nativePath + "/generation_log.csv";
-        await render.writeLog(result.logLines, logPath);
+        const result = await runGenerate(manifestRows, "Generating INDDs…", "generate");
         // Image Extension (phases 1–2): one record per page — frame / graphic
         // bounds, detected underfill, source-pixel expansion, status.
         await render.writeLog([JSON.stringify(result.imageChecks || [], null, 2)],
@@ -2551,7 +2565,7 @@ async function regenerateRow(rec) {
     }
     try {
         if (open) await render.closeIndd(p.inddPath);
-        const result = await runGenerate([rec], `Regenerating ${rec.headline}…`);
+        const result = await runGenerate([rec], `Regenerating ${rec.headline}…`, "regenerate");
         if (result.generated.length) {
             await render.openIndd(result.generated[0].inddPath);
             summarize(`✓ Regenerated ${rec.headline} — opened in InDesign`, result, channels.generate);
