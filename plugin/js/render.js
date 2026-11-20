@@ -1667,6 +1667,13 @@ async function inspectTemplates(templatePaths) {
 
 // ---------- run bookkeeping (log lines, counts, progress) ----------
 
+// PURE. One CSV cell for the plugin's simple logs: commas become ";" (as
+// before) and line breaks become " · " — a message with a line break used
+// to split its row in two (e.g. "Template detected … \n· Red subject frame").
+function csvCell(v) {
+    return String(v == null ? "" : v).replace(/,/g, ";").replace(/\s*[\r\n\u2028\u2029]+\s*(?:·\s*)?/g, " · ");
+}
+
 function makeRun(totalOps, onProgress) {
     const run = {
         logLines: ["timestamp,headline,page_label,output_file,status,message"],
@@ -1676,7 +1683,7 @@ function makeRun(totalOps, onProgress) {
         done: 0,
         total: totalOps,
     };
-    const csv = (v) => String(v == null ? "" : v).replace(/,/g, ";");
+    const csv = csvCell;
     run.line = (headline, label, outPath, status, message) => {
         run.logLines.push([new Date().toISOString(), csv(headline), csv(label), csv(outPath), status, csv(message)].join(","));
     };
@@ -2675,6 +2682,10 @@ async function setExtensionVisible(item, visible) {
 // only choice is which swatches are allowed (Step 1).
 
 const TEXT_COLOR_LABEL = "posterBatch.textColor";
+// sameColorForRoles: Headline and Subline always get the SAME colour, chosen
+// for both together (textcolor.js chooseTextColorForRoles). false = each
+// role chooses on its own (the behaviour before 19 Nov 2026).
+const TEXT_COLOR_CONFIG = { sameColorForRoles: true };
 const TEXT_COLOR_RESOLUTION = 36; // dpi of the analysis render
 
 let _textColorMods = null;
@@ -2913,21 +2924,54 @@ async function autoTextColorForDocument(doc, plan, swatches, options) {
                 }
             }
             const roles = [];
-            for (const [role, pi] of roleDefs) {
-                try {
-                    const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
-                    let size = 0;
-                    try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
-                    const best = mods.color.chooseTextColorByZones(zones, swatches, mods.color.readabilityThreshold(size, method),
-                        { method, preferred: template[role] });
-                    if (!best) { roles.push({ role, error: "no visible text lines" }); continue; }
-                    applyTextColor(doc, frame, pi, best.swatch);
-                    roles.push({ role, swatch: best.swatch.name, swatchId: best.swatch.id, score: best.score, overall: best.overall,
-                        threshold: best.threshold, readable: best.readable, keptTemplate: best.keptTemplate, method: best.method,
-                        weakest: best.weakest, zones: zones.length,
-                        ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
-                } catch (e) {
-                    roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
+            if (TEXT_COLOR_CONFIG.sameColorForRoles) {
+                // ONE colour for headline + subline (team decision): measure
+                // every role, choose jointly, apply the same swatch to all.
+                const measured = [];
+                for (const [role, pi] of roleDefs) {
+                    try {
+                        const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
+                        let size = 0;
+                        try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
+                        if (!zones.length) { roles.push({ role, error: "no visible text lines" }); continue; }
+                        measured.push({ role, pi, zones, threshold: mods.color.readabilityThreshold(size, method) });
+                    } catch (e) {
+                        roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
+                    }
+                }
+                const pick = mods.color.chooseTextColorForRoles(measured, swatches,
+                    { method, preferred: template.headline || template.subline });
+                if (pick) {
+                    const ranking = pick.ranking.slice(0, 3).map((x) => `${x.swatch.name} margin ${x.margin}`);
+                    for (const m of measured) {
+                        const s = pick.roles.find((x) => x.role === m.role);
+                        try {
+                            applyTextColor(doc, frame, m.pi, pick.swatch);
+                            roles.push({ role: m.role, swatch: pick.swatch.name, swatchId: pick.swatch.id, score: s.score, overall: s.overall,
+                                threshold: s.threshold, readable: s.readable, keptTemplate: pick.keptTemplate, method: pick.method,
+                                weakest: s.weakest, zones: m.zones.length, shared: true, ranking });
+                        } catch (e) {
+                            roles.push({ role: m.role, error: String((e && e.message) || e) });
+                        }
+                    }
+                }
+            } else {
+                for (const [role, pi] of roleDefs) {
+                    try {
+                        const zones = mods.color.sampleZones(image, roleLineBoxes(frame, pi).map(toPx));
+                        let size = 0;
+                        try { size = Number(story.paragraphs.item(pi).characters.item(0).pointSize); } catch (e) {}
+                        const best = mods.color.chooseTextColorByZones(zones, swatches, mods.color.readabilityThreshold(size, method),
+                            { method, preferred: template[role] });
+                        if (!best) { roles.push({ role, error: "no visible text lines" }); continue; }
+                        applyTextColor(doc, frame, pi, best.swatch);
+                        roles.push({ role, swatch: best.swatch.name, swatchId: best.swatch.id, score: best.score, overall: best.overall,
+                            threshold: best.threshold, readable: best.readable, keptTemplate: best.keptTemplate, method: best.method,
+                            weakest: best.weakest, zones: zones.length,
+                            ranking: best.ranking.slice(0, 3).map((x) => `${x.swatch.name} ${x.score}`) });
+                    } catch (e) {
+                        roles.push({ role, error: String((e && e.message) || e) }); // template colour stays for this role
+                    }
                 }
             }
             writeTextColorLabel(frame, roles, Object.keys(template).length ? template : null, method,
@@ -2945,7 +2989,7 @@ function textColorLogLine(r) {
     if (r.pending) return `${r.layout}: waits for Image Extension`;
     if (r.error) return `${r.layout}: kept template colour (${r.error})`;
     return `${r.layout}: ` + r.roles.map((x) => x.error ? `${x.role} kept template colour (${x.error})`
-        : `${x.role} ${x.swatch}${x.keptTemplate ? (x.readable ? " (template colour, readable)" : " (template colour, near-tie — nothing readable)") : ""} (${x.method === "apca" ? "APCA" : "WCAG 2"} ` +
+        : `${x.role} ${x.swatch}${x.shared ? " [same colour for headline + subline]" : ""}${x.keptTemplate ? (x.readable ? " (template colour, readable)" : " (template colour, near-tie — nothing readable)") : ""} (${x.method === "apca" ? "APCA" : "WCAG 2"} ` +
             `weakest-zone contrast ${contrastText(x.score, x.method)}; overall P10 ${x.overall}; needs ${contrastText(x.threshold, x.method)}` +
             `${x.readable ? "" : " — LOW"}; ranking ${x.ranking.join(" · ")})`).join(" | ");
 }
@@ -3144,6 +3188,104 @@ async function writeLog(logLines, logPath) {
     await fileEntry.write(logLines.join("\n") + "\n");
 }
 
+// ---------- generation history (generation_log.csv + generation_history.csv) ----------
+//
+// Every Generate / Regenerate / Apply is ADDED to generation_log.csv — same
+// six columns as before, plus run_id and run_type at the end. So the file
+// keeps the full history, and each row says which run it came from.
+// Size: when the file would grow past GENERATION_LOG.maxBytes, the existing
+// rows are moved to logs/generation_log_<first run>_to_<last run>.csv and a
+// new generation_log.csv starts. Nothing is deleted.
+// Catalogue: generation_history.csv has ONE row per run (time, type,
+// products, counts) — the short overview; run_id finds the detail rows.
+const GENERATION_LOG = {
+    file: "generation_log.csv",
+    history: "generation_history.csv",
+    archiveFolder: "logs",
+    maxBytes: 5 * 1024 * 1024,
+    runColumns: ["run_id", "run_type"],
+    historyHeader: "run_id,started,run_type,products,generated,failed,with_warnings,log_rows",
+};
+
+// PURE. "20261119-161532-042" (local time, to the millisecond) — sorts by time.
+function newRunId(date) {
+    const d = date || new Date();
+    const p = (n, w) => String(n).padStart(w || 2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`;
+}
+
+// PURE. A run's log lines (logLines[0] = header) with run_id + run_type
+// added to every line: { header, rows: [string] }.
+function tagRunLines(logLines, runId, runType) {
+    const lines = logLines || [];
+    return {
+        header: (lines[0] || "timestamp,headline,page_label,output_file,status,message") + "," + GENERATION_LOG.runColumns.join(","),
+        rows: lines.slice(1).filter((l) => String(l).length).map((l) => `${l},${csvCell(runId)},${csvCell(runType)}`),
+    };
+}
+
+// PURE. How to add `rows` to the existing log text (null = no file yet):
+// { text, archive: null | { text, name, reason } }. The existing rows are
+// archived when the header differs (a file from before this change) or the
+// file would grow past maxBytes.
+function planGenerationLogAppend(existing, header, rows, newRunIdValue, maxBytes) {
+    const add = rows.length ? rows.join("\n") + "\n" : "";
+    if (existing === null || existing === undefined || !String(existing).trim()) return { text: header + "\n" + add, archive: null };
+    const old = String(existing).replace(/\n?$/, "\n");
+    const lines = old.split("\n").filter((l) => l.length);
+    const limit = maxBytes || GENERATION_LOG.maxBytes;
+    let reason = "";
+    if (lines[0] !== header) reason = "older log format";
+    else if (old.length + add.length > limit) reason = `over ${Math.round(limit / 1024 / 1024)} MB`;
+    if (!reason) return { text: old + add, archive: null };
+    // run ids of the archived rows (the next-to-last column), for the file name
+    const ids = reason === "older log format" ? [] : lines.slice(1).map((l) => l.split(",").slice(-2)[0]).filter(Boolean);
+    const name = ids.length ? `generation_log_${ids[0]}_to_${ids[ids.length - 1]}.csv` : `generation_log_before_${newRunIdValue}.csv`;
+    return { text: header + "\n" + add, archive: { text: old, name, reason } };
+}
+
+// PURE. The generation_history.csv row of one run.
+function historyLine(runId, started, runType, products, result, logRows) {
+    const generated = (result && result.generated) || [];
+    const failed = result && Array.isArray(result.failed) ? result.failed.length : Number((result && result.errorCount) || 0);
+    const withWarnings = generated.filter((g) => g && g.warnings && g.warnings.length).length;
+    return [runId, started, runType, (products || []).map(csvCell).join(" | "), generated.length, failed, withWarnings, logRows]
+        .map(csvCell).join(",");
+}
+
+async function readTextIfExists(path) {
+    try {
+        const entry = await require("uxp").storage.localFileSystem.getEntryWithUrl(fileUrl(path));
+        return String(await entry.read());
+    } catch (e) {
+        return null;
+    }
+}
+
+// Adds one run to generation_log.csv and generation_history.csv in the
+// output folder. Returns { runId, rows, archived: name | null, reason }.
+// Throws only if a file can't be written (the caller reports it).
+async function recordGenerationRun(outputRoot, result, runType, products) {
+    const root = String(outputRoot).replace(/\/+$/, "");
+    const runId = newRunId();
+    const started = new Date().toISOString();
+    const { header, rows } = tagRunLines(result && result.logLines, runId, runType);
+    const logPath = `${root}/${GENERATION_LOG.file}`;
+    const plan = planGenerationLogAppend(await readTextIfExists(logPath), header, rows, runId);
+    if (plan.archive) {
+        // Archive first: if this fails, the existing log is left untouched.
+        await ensureFolder(`${root}/${GENERATION_LOG.archiveFolder}`);
+        await writeLog([plan.archive.text.replace(/\n$/, "")], `${root}/${GENERATION_LOG.archiveFolder}/${plan.archive.name}`);
+    }
+    await writeLog([plan.text.replace(/\n$/, "")], logPath);
+    const histPath = `${root}/${GENERATION_LOG.history}`;
+    const hist = await readTextIfExists(histPath);
+    const line = historyLine(runId, started, runType, products, result, rows.length);
+    const histText = hist && hist.trim() ? hist.replace(/\n?$/, "\n") + line : GENERATION_LOG.historyHeader + "\n" + line;
+    await writeLog([histText], histPath);
+    return { runId, rows: rows.length, archived: plan.archive ? plan.archive.name : null, reason: plan.archive ? plan.archive.reason : "" };
+}
+
 module.exports = {
     checkAudiFont, generateIndds, exportFromIndds, openIndd, inddPathFor, pathExists,
     isInddOpen, inddOpenState, closeIndd, backupIndds, activeDocumentPath, extendProductImage, setExtensionVisible, detectTemplateLayouts,
@@ -3151,5 +3293,6 @@ module.exports = {
     outputFolderFor, typeOfTemplate, TYPE_FOLDER, typeFolder, writeLog, debugModuleShape,
     pagesAwaitingExtension, largestFittingScale, wordSplitAcrossLines, linesFromStarts, fitHeadlineToFrame,
     lowContrastWarnings, textColorWarnings, summarizeTextColors, textColorLogLine, colorValueToRgb,
+    csvCell, newRunId, tagRunLines, planGenerationLogAppend, historyLine, recordGenerationRun, GENERATION_LOG,
     capsuleMissingWarning, capsuleStatusRecord, previewPlacementForPage, readPlacementGeometry,
 };

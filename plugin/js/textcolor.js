@@ -264,6 +264,44 @@ function chooseTextColorByZones(zones, candidates, threshold, options) {
         readable: pick.score >= t }, pick);
 }
 
+// PURE. ONE colour for all text roles of a page (Headline + Subline share a
+// colour — team decision, 19 Nov 2026).
+//   roles: [{ role, zones, threshold }] — each role keeps its OWN minimum
+//     (a small subline needs more contrast than a big headline)
+//   options: { method, preferred } as chooseTextColorByZones
+// A colour's margin = min over roles of (score − threshold): how far its
+// WEAKEST role is above (≥ 0, readable everywhere) or below its minimum.
+// The best margin wins (ties: higher summed score). Template colour: kept
+// when its margin ≥ 0, or when nothing reaches 0 and it is within
+// PREFER.nearTie of the best margin — the same rules as for one role.
+// Returns null (no role with zones / no candidates) or
+//   { swatch, method, margin, readable, keptTemplate,
+//     roles: [{ role, score, overall, mean, weakest, threshold, readable }],
+//     ranking: [{ swatch, margin, total }] }.
+function chooseTextColorForRoles(roles, candidates, options) {
+    const method = methodOf(options && options.method);
+    const usable = (roles || []).filter((r) => r && r.zones && r.zones.length);
+    const swatches = (candidates || []).filter((s) => s && s.rgb);
+    if (!usable.length || !swatches.length) return null;
+    const ranked = swatches.map((swatch) => {
+        const per = usable.map((r) => {
+            const t = r.threshold || readabilityThreshold(0, method);
+            const s = scoreZones(r.zones, swatch.rgb, method);
+            return Object.assign({ role: r.role, threshold: t, readable: s.score >= t }, s);
+        });
+        const margin = Math.round(Math.min(...per.map((p) => p.score - p.threshold)) * 100) / 100;
+        const total = per.reduce((s, p) => s + p.score, 0);
+        return { swatch, margin, total, roles: per };
+    }).sort((a, b) => b.margin - a.margin || b.total - a.total);
+    const tmpl = matchingSwatch(swatches, options && options.preferred);
+    const tr = tmpl && ranked.find((r) => r.swatch === tmpl);
+    const kept = tr && (tr.margin >= 0 || (ranked[0].margin < 0 && ranked[0].margin - tr.margin <= PREFER.nearTie[method])) ? tr : null;
+    const pick = kept || ranked[0];
+    return { swatch: pick.swatch, method, margin: pick.margin, readable: pick.margin >= 0,
+        keptTemplate: !!kept && pick !== ranked[0], roles: pick.roles,
+        ranking: ranked.map((r) => ({ swatch: r.swatch, margin: r.margin, total: r.total })) };
+}
+
 // Decodes a JPEG (ArrayBuffer / Uint8Array) to { width, height, data: RGBA }.
 function decodeJpeg(bytes) {
     let decode = null;
@@ -276,4 +314,4 @@ function decodeJpeg(bytes) {
 
 module.exports = { relativeLuminance, contrastRatio, sampleLuminances, rankColors, chooseTextColor, decodeJpeg, SCORE_PERCENTILE,
     readabilityThreshold, sampleZones, scoreZones, chooseTextColorByZones, READABLE, ZONES,
-    apcaY, apcaContrast, matchingSwatch, READABLE_APCA, METHODS, DEFAULT_METHOD, PREFER };
+    apcaY, apcaContrast, matchingSwatch, chooseTextColorForRoles, READABLE_APCA, METHODS, DEFAULT_METHOD, PREFER };

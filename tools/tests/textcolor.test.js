@@ -162,6 +162,34 @@ const apLine = render.textColorLogLine(apResults[0]);
 ok(/headline White RGB \(template colour, readable\) \(APCA weakest-zone contrast Lc 52.1;.*needs Lc 45;/.test(apLine), "log line: APCA, Lc units, template colour kept: " + apLine);
 ok(/^WARNING x: low text contrast — headline White RGB reaches Lc 30/.test(render.textColorWarnings([{ layout: "x", roles: [{ role: "headline", swatch: "White RGB", score: 30, threshold: 45, readable: false, method: "apca" }] }])[0] || ""),
     "low APCA contrast → WARNING in Lc units");
+// ---------- ONE colour for headline + subline (chooseTextColorForRoles) ----------
+const zonesOf = (rgb) => tc.sampleZones(bg(rgb, 400, 40), [{ x: 0, y: 0, width: 400, height: 40 }]);
+// the grey sky: big headline (Lc 45) on mid-tone, smaller subline (Lc 60) on a lighter part
+const headSky = { role: "headline", zones: zonesOf([170, 161, 160]), threshold: 45 };
+const subLight = { role: "subline", zones: zonesOf([215, 208, 206]), threshold: 60 };
+const joint = tc.chooseTextColorForRoles([headSky, subLight], bw, { preferred: [255, 255, 255] });
+const jh = joint.roles.find((r) => r.role === "headline"), js = joint.roles.find((r) => r.role === "subline");
+ok(joint.swatch.name === "Black" && joint.readable && jh.readable && js.readable,
+    `sky + lighter subline: ONE colour, Black (headline Lc ${jh.score}, subline Lc ${js.score}) — White would fail the subline`);
+const whiteRank = joint.ranking.find((r) => r.swatch.name === "White");
+ok(whiteRank.margin < 0 && joint.margin >= 0 && !joint.keptTemplate, `White's weakest role is below its minimum (margin ${whiteRank.margin}) → template White not kept`);
+// both readable in White → template White kept even if Black scores higher
+const darkSub = { role: "subline", zones: zonesOf([40, 40, 50]), threshold: 60 };
+const darkHead = { role: "headline", zones: zonesOf([60, 60, 70]), threshold: 45 };
+ok(tc.chooseTextColorForRoles([darkHead, darkSub], bw, { preferred: [255, 255, 255] }).swatch.name === "White", "dark behind both → White for both");
+// nothing works for both: dark headline area, bright subline area
+const brightSub = { role: "subline", zones: zonesOf([240, 240, 240]), threshold: 60 };
+const split = tc.chooseTextColorForRoles([darkHead, brightSub], bw, {});
+ok(split && !split.readable && split.roles.length === 2 && split.roles.some((r) => !r.readable), "dark headline + bright subline: one colour still chosen, flagged unreadable");
+ok(split.ranking.every((r, i, a) => i === 0 || a[i - 1].margin >= r.margin), "ranking sorted by margin (weakest role)");
+// near-tie for the joint choice too
+const tie = tc.chooseTextColorForRoles([{ role: "headline", zones: sky, threshold: 60 }], bw, { preferred: [255, 255, 255] });
+ok(tie.swatch.name === "White" && !tie.readable, "nothing readable, White ≈ Black → template White kept (still flagged)");
+ok(tc.chooseTextColorForRoles([{ role: "headline", zones: [], threshold: 45 }], bw, {}) === null && tc.chooseTextColorForRoles([headSky], [], {}) === null,
+    "no measured role / no candidates → null (template colours kept)");
+const sharedLine = render.textColorLogLine({ layout: "p", roles: [{ role: "headline", swatch: "Audi Black RGB", score: 50, overall: 55, threshold: 45, readable: true, method: "apca", shared: true, ranking: ["Audi Black RGB margin 5"] }] });
+ok(/headline Audi Black RGB \[same colour for headline \+ subline\]/.test(sharedLine), "log line marks the shared colour");
+
 // render.js: an InDesign colour → sRGB, whatever shape UXP gives the space enum in
 const enums = { RGB: { id: 1 }, CMYK: { id: 2 }, LAB: { id: 3 } };
 const toRgb = cp.toRgb;
